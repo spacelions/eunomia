@@ -20,7 +20,7 @@ import (
 	"golang.org/x/net/http2"
 
 	"github.com/spacelions/eunomia/internal/secrets"
-	"github.com/spacelions/eunomia/internal/testpg"
+	"github.com/spacelions/eunomia/test/testpg"
 )
 
 func execCLI(ctx context.Context, stdin string, args ...string) (string, error) {

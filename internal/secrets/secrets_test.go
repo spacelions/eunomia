@@ -11,7 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/spacelions/eunomia/internal/secrets"
-	"github.com/spacelions/eunomia/internal/testpg"
+	"github.com/spacelions/eunomia/test/testpg"
 )
 
 func TestLocalKeyWrapper_ParseAndGenerateErrors(t *testing.T) {

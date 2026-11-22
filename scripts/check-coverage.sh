@@ -28,11 +28,11 @@ TMP_RAW="$(mktemp)"
 TMP_FILTERED="$(mktemp)"
 trap 'rm -f "$TMP_RAW" "$TMP_FILTERED"' EXIT
 
-# Exclude test-only infrastructure (internal/testpg) from coverage accounting.
+# Exclude test-only infrastructure (test/) from coverage accounting.
 go test -race -coverprofile="$TMP_RAW" ./...
 
-# Filter out internal/testpg and cmd/eunomia/main.go (4-line os.Exit wrapper).
-grep -v -E '/internal/testpg/|/cmd/eunomia/main\.go:' "$TMP_RAW" > "$TMP_FILTERED"
+# Filter out test/ helpers and cmd/eunomia/main.go (4-line os.Exit wrapper).
+grep -v -E '/test/|/cmd/eunomia/main\.go:' "$TMP_RAW" > "$TMP_FILTERED"
 
 TOTAL_LINE="$(go tool cover -func="$TMP_FILTERED" | tail -n 1)"
 TOTAL_PCT="$(echo "$TOTAL_LINE" | awk '{gsub(/%/, "", $3); print $3}')"

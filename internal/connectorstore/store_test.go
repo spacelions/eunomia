@@ -9,7 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/spacelions/eunomia/internal/connectorstore"
-	"github.com/spacelions/eunomia/internal/testpg"
+	"github.com/spacelions/eunomia/test/testpg"
 )
 
 func TestStore_CRUDAndValidation(t *testing.T) {
