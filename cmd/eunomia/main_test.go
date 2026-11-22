@@ -1,38 +1,42 @@
 package main
 
 import (
-	"encoding/json"
-	"net/http"
-	"net/http/httptest"
+	"bytes"
+	"strings"
 	"testing"
+
+	"github.com/spacelions/eunomia/internal/secrets"
 )
 
-func TestHealthz(t *testing.T) {
-	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
-	rec := httptest.NewRecorder()
+func TestSecretKeygenCommand(t *testing.T) {
+	cmd := newRootCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetArgs([]string{"secret", "keygen", "--id", "v2"})
 
-	newMux().ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected status 200, got %d", rec.Code)
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("secret keygen failed: %v", err)
 	}
 
-	var body map[string]string
-	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
-		t.Fatalf("invalid json response: %v", err)
+	out := strings.TrimSpace(buf.String())
+	if !strings.HasPrefix(out, "v2:") {
+		t.Fatalf("expected v2: prefix, got %q", out)
 	}
-	if body["status"] != "ok" || body["service"] != "eunomia" {
-		t.Fatalf("unexpected healthz payload: %+v", body)
+	if _, err := secrets.ParseLocalKeyWrapper(out); err != nil {
+		t.Fatalf("generated key failed to parse: %v", err)
 	}
 }
 
-func TestRootNotFound(t *testing.T) {
-	req := httptest.NewRequest(http.MethodGet, "/does-not-exist", nil)
-	rec := httptest.NewRecorder()
+func TestParseKVPairs(t *testing.T) {
+	got, err := parseKVPairs([]string{"domain=spacelions.com", "impersonate_email=ops@spacelions.com"})
+	if err != nil {
+		t.Fatalf("parseKVPairs: %v", err)
+	}
+	if got["domain"] != "spacelions.com" || got["impersonate_email"] != "ops@spacelions.com" {
+		t.Fatalf("unexpected map: %+v", got)
+	}
 
-	newMux().ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("expected status 404, got %d", rec.Code)
+	if _, err := parseKVPairs([]string{"invalid-no-equals"}); err == nil {
+		t.Fatal("expected error for missing =")
 	}
 }

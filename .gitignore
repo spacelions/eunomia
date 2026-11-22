@@ -1,9 +1,8 @@
-# Ephemeral local dev data (Postgres, Temporal SQLite DB)
+# Ephemeral local dev data (Postgres, Temporal SQLite DB, local master key)
 .dev/
 
-# Local secrets & runtime connector config
+# Local secrets
 .env
-configs/connectors.yaml
 
 # Build outputs
 bin/
