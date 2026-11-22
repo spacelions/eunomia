@@ -2,8 +2,11 @@ package connectorstore_test
 
 import (
 	"context"
-	"errors"
 	"testing"
+
+	"github.com/google/go-cmp/cmp"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/spacelions/eunomia/internal/connectorstore"
 	"github.com/spacelions/eunomia/internal/testpg"
@@ -14,105 +17,66 @@ func TestStore_CRUDAndValidation(t *testing.T) {
 	store := connectorstore.New(database)
 	ctx := context.Background()
 
-	// Validation errors.
-	if err := store.Upsert(ctx, connectorstore.Record{ConnectorType: "notion"}); err == nil {
-		t.Fatal("expected error for missing tenant_id")
-	}
-	if err := store.Upsert(ctx, connectorstore.Record{TenantID: "spacelions"}); err == nil {
-		t.Fatal("expected error for missing connector_type")
-	}
+	require.Error(t, store.Upsert(ctx, connectorstore.Record{ConnectorType: "notion"}))
+	require.Error(t, store.Upsert(ctx, connectorstore.Record{TenantID: "spacelions"}))
 
-	// Not found errors.
-	if _, err := store.Get(ctx, "spacelions", "notion"); !errors.Is(err, connectorstore.ErrConnectorNotFound) {
-		t.Fatalf("expected ErrConnectorNotFound, got: %v", err)
-	}
-	if err := store.SetEnabled(ctx, "spacelions", "notion", false); !errors.Is(err, connectorstore.ErrConnectorNotFound) {
-		t.Fatalf("expected ErrConnectorNotFound on SetEnabled, got: %v", err)
-	}
+	_, err := store.Get(ctx, "spacelions", "notion")
+	require.ErrorIs(t, err, connectorstore.ErrConnectorNotFound)
+	require.ErrorIs(t, store.SetEnabled(ctx, "spacelions", "notion", false), connectorstore.ErrConnectorNotFound)
 
 	// Insert with nil maps (defaults to empty JSON objects).
-	if err := store.Upsert(ctx, connectorstore.Record{
+	require.NoError(t, store.Upsert(ctx, connectorstore.Record{
 		TenantID:      "spacelions",
 		ConnectorType: "slack",
 		Enabled:       false,
-	}); err != nil {
-		t.Fatalf("Upsert slack: %v", err)
-	}
+	}))
 
-	// Insert notion enabled with resources.
-	if err := store.Upsert(ctx, connectorstore.Record{
+	// Insert notion enabled with resources, then update via upsert.
+	require.NoError(t, store.Upsert(ctx, connectorstore.Record{
 		TenantID:      "spacelions",
 		ConnectorType: "notion",
 		Enabled:       true,
 		Settings:      map[string]string{"workspace": "spacelions"},
 		Resources:     map[string]string{"onboarding_tracker": "db-123"},
-	}); err != nil {
-		t.Fatalf("Upsert notion: %v", err)
-	}
-
-	// Upsert updates existing record.
-	if err := store.Upsert(ctx, connectorstore.Record{
+	}))
+	require.NoError(t, store.Upsert(ctx, connectorstore.Record{
 		TenantID:      "spacelions",
 		ConnectorType: "notion",
 		Enabled:       true,
 		Settings:      map[string]string{"workspace": "spacelions"},
 		Resources:     map[string]string{"onboarding_tracker": "db-456"},
-	}); err != nil {
-		t.Fatalf("Upsert update notion: %v", err)
-	}
+	}))
 
 	got, err := store.Get(ctx, "spacelions", "notion")
-	if err != nil {
-		t.Fatalf("Get notion: %v", err)
-	}
-	if got.Resources["onboarding_tracker"] != "db-456" || !got.Enabled {
-		t.Fatalf("unexpected notion record: %+v", got)
-	}
+	require.NoError(t, err)
+	assert.True(t, got.Enabled)
+	assert.Empty(t, cmp.Diff(map[string]string{"workspace": "spacelions"}, got.Settings))
+	assert.Empty(t, cmp.Diff(map[string]string{"onboarding_tracker": "db-456"}, got.Resources))
 
 	all, err := store.List(ctx, "spacelions")
-	if err != nil {
-		t.Fatalf("List: %v", err)
-	}
-	if len(all) != 2 || all[0].ConnectorType != "notion" || all[1].ConnectorType != "slack" {
-		t.Fatalf("unexpected List output: %+v", all)
-	}
+	require.NoError(t, err)
+	require.Len(t, all, 2)
+	assert.Empty(t, cmp.Diff([]string{"notion", "slack"}, []string{all[0].ConnectorType, all[1].ConnectorType}))
 
 	enabled, err := store.ListEnabled(ctx, "spacelions")
-	if err != nil {
-		t.Fatalf("ListEnabled: %v", err)
-	}
-	if len(enabled) != 1 || enabled[0].ConnectorType != "notion" {
-		t.Fatalf("unexpected ListEnabled output: %+v", enabled)
-	}
+	require.NoError(t, err)
+	require.Len(t, enabled, 1)
+	assert.Equal(t, "notion", enabled[0].ConnectorType)
 
-	// Disable notion.
-	if err := store.SetEnabled(ctx, "spacelions", "notion", false); err != nil {
-		t.Fatalf("SetEnabled false: %v", err)
-	}
+	require.NoError(t, store.SetEnabled(ctx, "spacelions", "notion", false))
 	enabled, err = store.ListEnabled(ctx, "spacelions")
-	if err != nil {
-		t.Fatalf("ListEnabled after disable: %v", err)
-	}
-	if len(enabled) != 0 {
-		t.Fatalf("expected 0 enabled connectors, got %d", len(enabled))
-	}
+	require.NoError(t, err)
+	assert.Empty(t, enabled)
 
 	// Canceled context propagates DB errors across all store methods.
 	canceledCtx, cancel := context.WithCancel(ctx)
 	cancel()
-	if err := store.Upsert(canceledCtx, connectorstore.Record{TenantID: "spacelions", ConnectorType: "notion"}); err == nil {
-		t.Fatal("expected Upsert error on canceled context")
-	}
-	if _, err := store.Get(canceledCtx, "spacelions", "notion"); err == nil {
-		t.Fatal("expected Get error on canceled context")
-	}
-	if _, err := store.List(canceledCtx, "spacelions"); err == nil {
-		t.Fatal("expected List error on canceled context")
-	}
-	if _, err := store.ListEnabled(canceledCtx, "spacelions"); err == nil {
-		t.Fatal("expected ListEnabled error on canceled context")
-	}
-	if err := store.SetEnabled(canceledCtx, "spacelions", "notion", true); err == nil {
-		t.Fatal("expected SetEnabled error on canceled context")
-	}
+	require.Error(t, store.Upsert(canceledCtx, connectorstore.Record{TenantID: "spacelions", ConnectorType: "notion"}))
+	_, err = store.Get(canceledCtx, "spacelions", "notion")
+	require.Error(t, err)
+	_, err = store.List(canceledCtx, "spacelions")
+	require.Error(t, err)
+	_, err = store.ListEnabled(canceledCtx, "spacelions")
+	require.Error(t, err)
+	require.Error(t, store.SetEnabled(canceledCtx, "spacelions", "notion", true))
 }

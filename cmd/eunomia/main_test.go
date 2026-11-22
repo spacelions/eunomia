@@ -14,6 +14,9 @@ import (
 	"time"
 
 	"connectrpc.com/grpchealth"
+	"github.com/google/go-cmp/cmp"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"golang.org/x/net/http2"
 
 	"github.com/spacelions/eunomia/internal/secrets"
@@ -33,34 +36,28 @@ func execCLI(ctx context.Context, stdin string, args ...string) (string, error) 
 
 func TestSecretKeygenCommand(t *testing.T) {
 	out, err := execCLI(context.Background(), "", "secret", "keygen", "--id", "v2")
-	if err != nil {
-		t.Fatalf("secret keygen failed: %v", err)
-	}
-	trimmed := strings.TrimSpace(out)
-	if !strings.HasPrefix(trimmed, "v2:") {
-		t.Fatalf("expected v2: prefix, got %q", trimmed)
-	}
-	if _, err := secrets.ParseLocalKeyWrapper(trimmed); err != nil {
-		t.Fatalf("generated key failed to parse: %v", err)
-	}
+	require.NoError(t, err)
 
-	if _, err := execCLI(context.Background(), "", "secret", "keygen", "--id", "bad:id"); err == nil {
-		t.Fatal("expected error for invalid key id")
-	}
+	trimmed := strings.TrimSpace(out)
+	assert.True(t, strings.HasPrefix(trimmed, "v2:"))
+	_, err = secrets.ParseLocalKeyWrapper(trimmed)
+	require.NoError(t, err)
+
+	_, err = execCLI(context.Background(), "", "secret", "keygen", "--id", "bad:id")
+	require.Error(t, err)
 }
 
 func TestParseKVPairs(t *testing.T) {
 	got, err := parseKVPairs([]string{"domain=spacelions.com", "impersonate_email=ops@spacelions.com"})
-	if err != nil {
-		t.Fatalf("parseKVPairs: %v", err)
+	require.NoError(t, err)
+	want := map[string]string{
+		"domain":            "spacelions.com",
+		"impersonate_email": "ops@spacelions.com",
 	}
-	if got["domain"] != "spacelions.com" || got["impersonate_email"] != "ops@spacelions.com" {
-		t.Fatalf("unexpected map: %+v", got)
-	}
+	assert.Empty(t, cmp.Diff(want, got))
 
-	if _, err := parseKVPairs([]string{"invalid-no-equals"}); err == nil {
-		t.Fatal("expected error for missing =")
-	}
+	_, err = parseKVPairs([]string{"invalid-no-equals"})
+	require.Error(t, err)
 }
 
 func TestCLI_Migrate_Connector_Secret_AndServeLifecycle(t *testing.T) {
@@ -68,41 +65,33 @@ func TestCLI_Migrate_Connector_Secret_AndServeLifecycle(t *testing.T) {
 	ctx := context.Background()
 
 	k1, err := secrets.GenerateLocalKey("v1")
-	if err != nil {
-		t.Fatalf("GenerateLocalKey v1: %v", err)
-	}
+	require.NoError(t, err)
 	k2, err := secrets.GenerateLocalKey("v2")
-	if err != nil {
-		t.Fatalf("GenerateLocalKey v2: %v", err)
-	}
+	require.NoError(t, err)
+	k3, err := secrets.GenerateLocalKey("v3")
+	require.NoError(t, err)
 
 	t.Setenv("EUNOMIA_DATABASE_URL", dsn)
 	t.Setenv("EUNOMIA_MASTER_KEYS", k1)
 	t.Setenv("EUNOMIA_DEFAULT_TENANT", "spacelions")
 
 	// 0. Serve must fail fast before migrations are run (never auto-migrates).
-	if _, err := execCLI(ctx, "", "serve"); err == nil {
-		t.Fatal("expected serve to fail fast on unmigrated database")
-	}
+	_, err = execCLI(ctx, "", "serve")
+	require.Error(t, err)
 
 	// 1. Migrate (first time applies, second time up to date).
-	if _, err := execCLI(ctx, "", "migrate"); err != nil {
-		t.Fatalf("migrate first run failed: %v", err)
-	}
-	if _, err := execCLI(ctx, "", "migrate"); err != nil {
-		t.Fatalf("migrate second run failed: %v", err)
-	}
+	_, err = execCLI(ctx, "", "migrate")
+	require.NoError(t, err)
+	_, err = execCLI(ctx, "", "migrate")
+	require.NoError(t, err)
 
 	// 2. Connector set (create + merge), list, disable, and error checks.
-	if _, err := execCLI(ctx, "", "connector", "set"); err == nil {
-		t.Fatal("expected error when --type is missing")
-	}
-	if _, err := execCLI(ctx, "", "connector", "set", "--type", "notion", "--setting", "bad"); err == nil {
-		t.Fatal("expected error for invalid --setting")
-	}
-	if _, err := execCLI(ctx, "", "connector", "set", "--type", "notion", "--resource", "bad"); err == nil {
-		t.Fatal("expected error for invalid --resource")
-	}
+	_, err = execCLI(ctx, "", "connector", "set")
+	require.Error(t, err)
+	_, err = execCLI(ctx, "", "connector", "set", "--type", "notion", "--setting", "bad")
+	require.Error(t, err)
+	_, err = execCLI(ctx, "", "connector", "set", "--type", "notion", "--resource", "bad")
+	require.Error(t, err)
 
 	out, err := execCLI(ctx, "", "connector", "set",
 		"--type", "notion",
@@ -110,99 +99,72 @@ func TestCLI_Migrate_Connector_Secret_AndServeLifecycle(t *testing.T) {
 		"--setting", "workspace=spacelions",
 		"--resource", "onboarding_tracker=db-1",
 	)
-	if err != nil || !strings.Contains(out, "Saved connector spacelions/notion") {
-		t.Fatalf("connector set failed: err=%v out=%q", err, out)
-	}
+	require.NoError(t, err)
+	assert.Contains(t, out, "Saved connector spacelions/notion")
 
-	// Merge an additional setting on existing connector.
-	if _, err := execCLI(ctx, "", "connector", "set",
+	_, err = execCLI(ctx, "", "connector", "set",
 		"--type", "notion",
 		"--enabled=true",
 		"--setting", "region=us",
-	); err != nil {
-		t.Fatalf("connector set merge failed: %v", err)
-	}
+	)
+	require.NoError(t, err)
 
 	listOut, err := execCLI(ctx, "", "connector", "list")
-	if err != nil {
-		t.Fatalf("connector list failed: %v", err)
-	}
-	if !strings.Contains(listOut, "notion") || !strings.Contains(listOut, "onboarding_tracker") || !strings.Contains(listOut, "region") {
-		t.Fatalf("unexpected connector list output:\n%s", listOut)
-	}
+	require.NoError(t, err)
+	assert.Contains(t, listOut, "notion")
+	assert.Contains(t, listOut, "onboarding_tracker")
+	assert.Contains(t, listOut, "region")
 
-	if _, err := execCLI(ctx, "", "connector", "disable"); err == nil {
-		t.Fatal("expected error when --type is missing on disable")
-	}
-	if _, err := execCLI(ctx, "", "connector", "disable", "--type", "nonexistent"); err == nil {
-		t.Fatal("expected error when disabling missing connector")
-	}
+	_, err = execCLI(ctx, "", "connector", "disable")
+	require.Error(t, err)
+	_, err = execCLI(ctx, "", "connector", "disable", "--type", "nonexistent")
+	require.Error(t, err)
 
-	// 3. Secret set (stdin + file + raw + errors), list, rotate-master-key, delete.
-	if _, err := execCLI(ctx, "tok", "secret", "set"); err == nil {
-		t.Fatal("expected error when --connector/--key missing")
-	}
-	if _, err := execCLI(ctx, "", "secret", "set", "--connector", "notion", "--key", "token"); err == nil {
-		t.Fatal("expected error when secret value is empty")
-	}
-	if _, err := execCLI(ctx, "", "secret", "set", "--connector", "notion", "--key", "token", "--file", "/no/such/file"); err == nil {
-		t.Fatal("expected error when --file does not exist")
-	}
+	// 3. Secret set (stdin + file + errors), list, rotate-master-key, delete.
+	_, err = execCLI(ctx, "tok", "secret", "set")
+	require.Error(t, err)
+	_, err = execCLI(ctx, "", "secret", "set", "--connector", "notion", "--key", "token")
+	require.Error(t, err)
+	_, err = execCLI(ctx, "", "secret", "set", "--connector", "notion", "--key", "token", "--file", "/no/such/file")
+	require.Error(t, err)
 
-	if _, err := execCLI(ctx, "secret-token-value\n", "secret", "set", "--connector", "notion", "--key", "token"); err != nil {
-		t.Fatalf("secret set from stdin failed: %v", err)
-	}
+	_, err = execCLI(ctx, "secret-token-value\n", "secret", "set", "--connector", "notion", "--key", "token")
+	require.NoError(t, err)
 
 	saFile := filepath.Join(t.TempDir(), "sa.json")
-	if err := os.WriteFile(saFile, []byte(`{"type":"service_account"}`), 0o600); err != nil {
-		t.Fatalf("write temp sa file: %v", err)
-	}
-	if _, err := execCLI(ctx, "", "secret", "set", "--connector", "google_workspace", "--key", "sa_json", "--file", saFile); err != nil {
-		t.Fatalf("secret set from --file failed: %v", err)
-	}
+	require.NoError(t, os.WriteFile(saFile, []byte(`{"type":"service_account"}`), 0o600))
+	_, err = execCLI(ctx, "", "secret", "set", "--connector", "google_workspace", "--key", "sa_json", "--file", saFile)
+	require.NoError(t, err)
 
 	secList, err := execCLI(ctx, "", "secret", "list")
-	if err != nil {
-		t.Fatalf("secret list failed: %v", err)
-	}
-	if !strings.Contains(secList, "notion") || !strings.Contains(secList, "v1") {
-		t.Fatalf("unexpected secret list:\n%s", secList)
-	}
-	if strings.Contains(secList, "secret-token-value") {
-		t.Fatalf("secret list leaked plaintext:\n%s", secList)
-	}
+	require.NoError(t, err)
+	assert.Contains(t, secList, "notion")
+	assert.Contains(t, secList, "v1")
+	assert.NotContains(t, secList, "secret-token-value")
 
 	// Rotate master key with missing old key fails cleanly.
-	k3, _ := secrets.GenerateLocalKey("v3")
 	t.Setenv("EUNOMIA_MASTER_KEYS", k3)
-	if _, err := execCLI(ctx, "", "secret", "rotate-master-key"); err == nil {
-		t.Fatal("expected rotate-master-key error when v1 is missing")
-	}
+	_, err = execCLI(ctx, "", "secret", "rotate-master-key")
+	require.Error(t, err)
 
 	// Rotate master key to v2.
 	t.Setenv("EUNOMIA_MASTER_KEYS", k2+","+k1)
 	rotOut, err := execCLI(ctx, "", "secret", "rotate-master-key")
-	if err != nil || !strings.Contains(rotOut, "Re-wrapped 2 secret(s)") {
-		t.Fatalf("rotate-master-key failed: err=%v out=%q", err, rotOut)
-	}
+	require.NoError(t, err)
+	assert.Contains(t, rotOut, "Re-wrapped 2 secret(s)")
 
 	// Retire v1 and delete secrets.
 	t.Setenv("EUNOMIA_MASTER_KEYS", k2)
-	if _, err := execCLI(ctx, "", "secret", "delete"); err == nil {
-		t.Fatal("expected error when --connector/--key missing on delete")
-	}
-	if _, err := execCLI(ctx, "", "secret", "delete", "--connector", "notion", "--key", "token"); err != nil {
-		t.Fatalf("secret delete failed: %v", err)
-	}
-	if _, err := execCLI(ctx, "", "secret", "delete", "--connector", "notion", "--key", "token"); err == nil {
-		t.Fatal("expected error deleting already-deleted secret")
-	}
+	_, err = execCLI(ctx, "", "secret", "delete")
+	require.Error(t, err)
+	_, err = execCLI(ctx, "", "secret", "delete", "--connector", "notion", "--key", "token")
+	require.NoError(t, err)
+	_, err = execCLI(ctx, "", "secret", "delete", "--connector", "notion", "--key", "token")
+	require.Error(t, err)
 
 	// 4. Serve lifecycle: start ConnectRPC server on free port, verify gRPC health check, cancel cleanly.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("pick free port: %v", err)
-	}
+	require.NoError(t, err)
 	grpcAddr := ln.Addr().String()
 	_ = ln.Close()
 
@@ -223,54 +185,40 @@ func TestCLI_Migrate_Connector_Secret_AndServeLifecycle(t *testing.T) {
 	}
 
 	healthURL := fmt.Sprintf("http://%s/%s/Check", grpcAddr, grpchealth.HealthV1ServiceName)
-	deadline := time.Now().Add(5 * time.Second)
-	ready := false
-	for time.Now().Before(deadline) {
+	require.Eventually(t, func() bool {
 		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, healthURL, bytes.NewReader([]byte(`{}`)))
 		req.Header.Set("Content-Type", "application/json")
 		resp, reqErr := h2cClient.Do(req)
-		if reqErr == nil {
-			_ = resp.Body.Close()
-			if resp.StatusCode == http.StatusOK {
-				ready = true
-				break
-			}
+		if reqErr != nil {
+			return false
 		}
-		time.Sleep(50 * time.Millisecond)
-	}
+		_ = resp.Body.Close()
+		return resp.StatusCode == http.StatusOK
+	}, 5*time.Second, 50*time.Millisecond, "ConnectRPC server did not become healthy in time")
+
 	cancelServe()
-	if !ready {
-		t.Fatal("ConnectRPC server did not become healthy in time")
-	}
-	if sErr := <-serveErrCh; sErr != nil {
-		t.Fatalf("serve returned error on graceful shutdown: %v", sErr)
-	}
+	require.NoError(t, <-serveErrCh)
 
-	// Also verify serve fails cleanly when grpc-addr is already bound.
+	// Serve fails cleanly when grpc-addr is already bound.
 	busyLn, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("bind busy listener: %v", err)
-	}
+	require.NoError(t, err)
 	defer func() { _ = busyLn.Close() }()
-	if _, err := execCLI(ctx, "", "serve", "--grpc-addr", busyLn.Addr().String()); err == nil {
-		t.Fatal("expected serve error when grpc-addr is already in use")
-	}
+	_, err = execCLI(ctx, "", "serve", "--grpc-addr", busyLn.Addr().String())
+	require.Error(t, err)
 
-	// Also verify default root invocation runs serve (fails fast with bad config).
+	// Default root invocation runs serve (fails fast with bad config).
 	t.Setenv("EUNOMIA_MASTER_KEYS", "")
-	if _, err := execCLI(ctx, ""); err == nil {
-		t.Fatal("expected fail-fast when EUNOMIA_MASTER_KEYS is unset")
-	}
+	_, err = execCLI(ctx, "")
+	require.Error(t, err)
 
-	// Disable connector at end.
-	if _, err := execCLI(ctx, "", "connector", "disable", "--type", "notion"); err != nil {
-		t.Fatalf("connector disable failed: %v", err)
-	}
+	_, err = execCLI(ctx, "", "connector", "disable", "--type", "notion")
+	require.NoError(t, err)
 }
 
 func TestCLI_BadConfigAndUnreachableDBErrors(t *testing.T) {
 	ctx := context.Background()
-	k1, _ := secrets.GenerateLocalKey("v1")
+	k1, err := secrets.GenerateLocalKey("v1")
+	require.NoError(t, err)
 
 	t.Setenv("EUNOMIA_DATABASE_URL", "")
 	t.Setenv("EUNOMIA_MASTER_KEYS", "")
@@ -286,12 +234,10 @@ func TestCLI_BadConfigAndUnreachableDBErrors(t *testing.T) {
 		{"connector", "list"},
 		{"connector", "disable", "--type", "notion"},
 	} {
-		if _, err := execCLI(ctx, "v", args...); err == nil {
-			t.Errorf("expected config error for %v", args)
-		}
+		_, err := execCLI(ctx, "v", args...)
+		assert.Error(t, err, "expected config error for %v", args)
 	}
 
-	// Valid config syntax but unreachable Postgres -> all DB commands fail fast.
 	t.Setenv("EUNOMIA_DATABASE_URL", "postgres://postgres@127.0.0.1:1/eunomia?sslmode=disable")
 	t.Setenv("EUNOMIA_MASTER_KEYS", k1)
 	for _, args := range [][]string{
@@ -302,8 +248,7 @@ func TestCLI_BadConfigAndUnreachableDBErrors(t *testing.T) {
 		{"connector", "list"},
 		{"connector", "disable", "--type", "notion"},
 	} {
-		if _, err := execCLI(ctx, "v", args...); err == nil {
-			t.Errorf("expected unreachable DB error for %v", args)
-		}
+		_, err := execCLI(ctx, "v", args...)
+		assert.Error(t, err, "expected unreachable DB error for %v", args)
 	}
 }

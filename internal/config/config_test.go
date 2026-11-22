@@ -3,19 +3,19 @@ package config
 import (
 	"bytes"
 	"log/slog"
-	"strings"
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/spf13/pflag"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/spacelions/eunomia/internal/secrets"
 )
 
 func TestLoadFromViper_SuccessAndRedaction(t *testing.T) {
 	key, err := secrets.GenerateLocalKey("v1")
-	if err != nil {
-		t.Fatalf("GenerateLocalKey: %v", err)
-	}
+	require.NoError(t, err)
 
 	v := NewViper()
 	v.Set("database-url", "postgres://postgres:supersecretpw@127.0.0.1:54329/eunomia?sslmode=disable")
@@ -23,59 +23,64 @@ func TestLoadFromViper_SuccessAndRedaction(t *testing.T) {
 	v.Set("deepseek-api-key", "sk-secret-deepseek-token")
 
 	cfg, err := LoadFromViper(v)
-	if err != nil {
-		t.Fatalf("expected valid config, got error: %v", err)
+	require.NoError(t, err)
+
+	want := &Config{
+		GRPCAddr:          "127.0.0.1:8080",
+		DatabaseURL:       "postgres://postgres:supersecretpw@127.0.0.1:54329/eunomia?sslmode=disable",
+		TemporalAddr:      "127.0.0.1:7233",
+		TemporalNamespace: "default",
+		TemporalTaskQueue: "eunomia",
+		DefaultTenant:     "spacelions",
+		MasterKeys:        key,
+		DeepSeekAPIKey:    "sk-secret-deepseek-token",
 	}
-	if cfg.GRPCAddr != "127.0.0.1:8080" {
-		t.Fatalf("expected default grpc addr, got %q", cfg.GRPCAddr)
-	}
-	if cfg.DefaultTenant != "spacelions" {
-		t.Fatalf("expected default tenant spacelions, got %q", cfg.DefaultTenant)
-	}
+	assert.Empty(t, cmp.Diff(want, cfg))
 
 	// Ensure secrets are never leaked via String() or slog.
-	if strings.Contains(cfg.String(), "supersecretpw") || strings.Contains(cfg.String(), key) || strings.Contains(cfg.String(), "sk-secret") {
-		t.Fatalf("Config.String() leaked secret material: %s", cfg.String())
+	for _, secret := range []string{"supersecretpw", key, "sk-secret"} {
+		assert.NotContains(t, cfg.String(), secret)
 	}
 
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, nil))
 	logger.Info("boot", "config", cfg)
-	logged := buf.String()
-	if strings.Contains(logged, "supersecretpw") || strings.Contains(logged, key) || strings.Contains(logged, "sk-secret") {
-		t.Fatalf("slog output leaked secret material: %s", logged)
+	for _, secret := range []string{"supersecretpw", key, "sk-secret"} {
+		assert.NotContains(t, buf.String(), secret)
 	}
 }
 
 func TestRegisterFlags_OverridesEnv(t *testing.T) {
 	key, err := secrets.GenerateLocalKey("v1")
-	if err != nil {
-		t.Fatalf("GenerateLocalKey: %v", err)
-	}
+	require.NoError(t, err)
 
 	v := NewViper()
 	fs := pflag.NewFlagSet("eunomia", pflag.ContinueOnError)
 	RegisterFlags(fs, v)
 	v.Set("master-keys", key)
 
-	if err := fs.Parse([]string{
+	require.NoError(t, fs.Parse([]string{
 		"--grpc-addr=127.0.0.1:9090",
 		"--database-url=postgresql://postgres@127.0.0.1:54329/eunomia",
 		"--temporal-addr=127.0.0.1:7234",
 		"--temporal-namespace=prod",
 		"--temporal-task-queue=eunomia-prod",
 		"--default-tenant=acme",
-	}); err != nil {
-		t.Fatalf("flag parse: %v", err)
-	}
+	}))
 
 	cfg, err := LoadFromViper(v)
-	if err != nil {
-		t.Fatalf("LoadFromViper: %v", err)
+	require.NoError(t, err)
+
+	want := &Config{
+		GRPCAddr:          "127.0.0.1:9090",
+		DatabaseURL:       "postgresql://postgres@127.0.0.1:54329/eunomia",
+		TemporalAddr:      "127.0.0.1:7234",
+		TemporalNamespace: "prod",
+		TemporalTaskQueue: "eunomia-prod",
+		DefaultTenant:     "acme",
+		MasterKeys:        key,
 	}
-	if cfg.GRPCAddr != "127.0.0.1:9090" || cfg.TemporalNamespace != "prod" || cfg.TemporalTaskQueue != "eunomia-prod" || cfg.DefaultTenant != "acme" {
-		t.Fatalf("flag overrides not applied: %+v", cfg)
-	}
+	assert.Empty(t, cmp.Diff(want, cfg))
 }
 
 func TestLoadFromViper_FailFastValidation(t *testing.T) {
@@ -87,10 +92,7 @@ func TestLoadFromViper_FailFastValidation(t *testing.T) {
 	v.Set("default-tenant", "")
 
 	_, err := LoadFromViper(v)
-	if err == nil {
-		t.Fatal("expected error when required fields are missing/invalid")
-	}
-	msg := err.Error()
+	require.Error(t, err)
 	for _, want := range []string{
 		"EUNOMIA_DATABASE_URL",
 		"EUNOMIA_GRPC_ADDR",
@@ -98,9 +100,7 @@ func TestLoadFromViper_FailFastValidation(t *testing.T) {
 		"EUNOMIA_DEFAULT_TENANT",
 		"EUNOMIA_MASTER_KEYS",
 	} {
-		if !strings.Contains(msg, want) {
-			t.Errorf("expected error mentioning %s, got: %s", want, msg)
-		}
+		assert.ErrorContains(t, err, want)
 	}
 }
 
@@ -109,50 +109,40 @@ func TestLoadFromViper_InvalidURLAndMasterKey(t *testing.T) {
 	v.Set("database-url", "mysql://localhost/eunomia")
 	v.Set("master-keys", "v1:not-valid-base64!!!")
 
-	err := (&Config{DatabaseURL: "mysql://localhost/eunomia", MasterKeys: "v1:not-valid-base64!!!"}).ValidateForServe()
-	if err == nil || !strings.Contains(err.Error(), "postgres://") {
-		t.Fatalf("expected invalid postgres URL error, got: %v", err)
-	}
+	err := (&Config{
+		DatabaseURL: "mysql://localhost/eunomia",
+		MasterKeys:  "v1:not-valid-base64!!!",
+	}).ValidateForServe()
+	require.ErrorContains(t, err, "postgres://")
 
-	if _, err := LoadFromViper(v); err == nil {
-		t.Fatal("expected error for invalid URL and master key")
-	}
-
-	if got := redactDatabaseURL("://bad-url"); got != "[INVALID_URL]" {
-		t.Fatalf("expected [INVALID_URL], got %q", got)
-	}
+	_, err = LoadFromViper(v)
+	require.Error(t, err)
+	assert.Equal(t, "[INVALID_URL]", redactDatabaseURL("://bad-url"))
 }
 
 func TestLoadForMigrateAndSecrets(t *testing.T) {
 	key, err := secrets.GenerateLocalKey("v1")
-	if err != nil {
-		t.Fatalf("GenerateLocalKey: %v", err)
-	}
+	require.NoError(t, err)
 
 	v := NewViper()
 	v.Set("database-url", "")
-	if _, err := LoadForMigrateFromViper(v); err == nil {
-		t.Fatal("expected migrate error when database URL is missing")
-	}
+	_, err = LoadForMigrateFromViper(v)
+	require.Error(t, err)
 
 	v.Set("database-url", "postgres://postgres@127.0.0.1:54329/eunomia?sslmode=disable")
 	v.Set("master-keys", "")
-	if _, err := LoadForMigrateFromViper(v); err != nil {
-		t.Fatalf("migrate config should not require master keys: %v", err)
-	}
-	if _, err := LoadForSecretsFromViper(v); err == nil {
-		t.Fatal("secrets config must require master keys")
-	}
+	_, err = LoadForMigrateFromViper(v)
+	require.NoError(t, err)
+	_, err = LoadForSecretsFromViper(v)
+	require.Error(t, err)
 
 	v.Set("master-keys", key)
-	if _, err := LoadForSecretsFromViper(v); err != nil {
-		t.Fatalf("expected valid secrets config, got: %v", err)
-	}
+	_, err = LoadForSecretsFromViper(v)
+	require.NoError(t, err)
 
 	vBadDB := NewViper()
 	vBadDB.Set("database-url", "")
 	vBadDB.Set("master-keys", key)
-	if _, err := LoadForSecretsFromViper(vBadDB); err == nil {
-		t.Fatal("secrets config must require database URL")
-	}
+	_, err = LoadForSecretsFromViper(vBadDB)
+	require.Error(t, err)
 }

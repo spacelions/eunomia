@@ -14,6 +14,9 @@ import (
 	"testing"
 
 	"connectrpc.com/grpchealth"
+	"github.com/google/go-cmp/cmp"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"golang.org/x/net/http2"
 )
 
@@ -47,61 +50,40 @@ func TestGRPCHealthCheck_ServingAndNotServing(t *testing.T) {
 	checkConnectJSON := func(wantStatus string) {
 		t.Helper()
 		req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, endpoint, bytes.NewReader([]byte(`{}`)))
-		if err != nil {
-			t.Fatalf("new request: %v", err)
-		}
+		require.NoError(t, err)
 		req.Header.Set("Content-Type", "application/json")
 		resp, err := h2cClient.Do(req)
-		if err != nil {
-			t.Fatalf("connect health request failed: %v", err)
-		}
+		require.NoError(t, err)
 		defer func() { _ = resp.Body.Close() }()
-		if resp.StatusCode != http.StatusOK {
-			t.Fatalf("expected HTTP 200, got %d", resp.StatusCode)
-		}
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+
 		var body struct {
 			Status string `json:"status"`
 		}
-		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-			t.Fatalf("decode response: %v", err)
-		}
-		if body.Status != wantStatus {
-			t.Fatalf("expected status %q, got %q", wantStatus, body.Status)
-		}
+		require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+		assert.Equal(t, wantStatus, body.Status)
 	}
 
 	checkBinaryGRPC := func(wantEnum byte) {
 		t.Helper()
-		// Standard gRPC length-prefixed empty HealthCheckRequest: compression=0, length=0.
 		req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, endpoint, bytes.NewReader([]byte{0, 0, 0, 0, 0}))
-		if err != nil {
-			t.Fatalf("new grpc request: %v", err)
-		}
+		require.NoError(t, err)
 		req.Header.Set("Content-Type", "application/grpc")
 		resp, err := h2cClient.Do(req)
-		if err != nil {
-			t.Fatalf("grpc health request failed: %v", err)
-		}
+		require.NoError(t, err)
 		defer func() { _ = resp.Body.Close() }()
+
 		raw, err := io.ReadAll(resp.Body)
-		if err != nil {
-			t.Fatalf("read grpc body: %v", err)
-		}
-		if got := resp.Trailer.Get("Grpc-Status"); got != "0" {
-			t.Fatalf("expected Grpc-Status 0, got %q (headers=%v)", got, resp.Header)
-		}
-		// Protobuf HealthCheckResponse { ServingStatus status = 1; } -> 5-byte frame header + 0x08 <enum>
+		require.NoError(t, err)
+		assert.Equal(t, "0", resp.Trailer.Get("Grpc-Status"))
+
 		wantFrame := []byte{0, 0, 0, 0, 2, 0x08, wantEnum}
-		if !bytes.Equal(raw, wantFrame) {
-			t.Fatalf("unexpected grpc frame: got %x, want %x", raw, wantFrame)
-		}
+		assert.Empty(t, cmp.Diff(wantFrame, raw))
 	}
 
-	// Healthy DB -> SERVING (enum 1)
 	checkConnectJSON("SERVING_STATUS_SERVING")
 	checkBinaryGRPC(1)
 
-	// Unhealthy DB -> NOT_SERVING (enum 2)
 	dbHealthy.Store(false)
 	checkConnectJSON("SERVING_STATUS_NOT_SERVING")
 	checkBinaryGRPC(2)
@@ -110,9 +92,8 @@ func TestGRPCHealthCheck_ServingAndNotServing(t *testing.T) {
 func TestNewHTTPServerAndNilReadiness(t *testing.T) {
 	h := NewHandler(nil)
 	srv := NewHTTPServer("127.0.0.1:0", h)
-	if srv.Addr != "127.0.0.1:0" || srv.Handler == nil {
-		t.Fatalf("unexpected server config: %+v", srv)
-	}
+	assert.Equal(t, "127.0.0.1:0", srv.Addr)
+	assert.NotNil(t, srv.Handler)
 
 	ts := httptest.NewUnstartedServer(h)
 	ts.EnableHTTP2 = true
@@ -120,16 +101,10 @@ func TestNewHTTPServerAndNilReadiness(t *testing.T) {
 	defer ts.Close()
 
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, ts.URL+"/"+grpchealth.HealthV1ServiceName+"/Check", bytes.NewReader([]byte(`{}`)))
-	if err != nil {
-		t.Fatalf("new request: %v", err)
-	}
+	require.NoError(t, err)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := ts.Client().Do(req)
-	if err != nil {
-		t.Fatalf("do request: %v", err)
-	}
+	require.NoError(t, err)
 	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200 with nil readiness check, got %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
 }

@@ -3,18 +3,17 @@ package migrations
 import (
 	"regexp"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 var timestampPrefixRe = regexp.MustCompile(`^\d{14}$`)
 
 func TestMigrationsUseTimestampPrefix(t *testing.T) {
 	all := Migrations.Sorted()
-	if len(all) == 0 {
-		t.Fatal("expected at least one migration")
-	}
+	require.NotEmpty(t, all)
 	for _, m := range all {
-		if !timestampPrefixRe.MatchString(m.Name) {
-			t.Errorf("migration %q (%s) must use a 14-digit YYYYMMDDHHMMSS timestamp prefix", m.Name, m.Comment)
-		}
+		assert.Regexp(t, timestampPrefixRe, m.Name, "migration %s must use a 14-digit YYYYMMDDHHMMSS timestamp prefix", m.Comment)
 	}
 }
