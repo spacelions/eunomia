@@ -1,0 +1,16 @@
+# Ephemeral local dev data (Postgres, Temporal SQLite DB)
+.dev/
+
+# Local secrets & runtime connector config
+.env
+configs/connectors.yaml
+
+# Build outputs
+bin/
+*.test
+*.out
+
+# OS & editor files
+.DS_Store
+.idea/
+.vscode/

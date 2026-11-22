@@ -1,0 +1,22 @@
+# Copy to configs/connectors.yaml (gitignored).
+# Secrets are expanded from environment variables at boot — never commit real credentials.
+connectors:
+  google_workspace:
+    enabled: true
+    auth:
+      service_account_json_path: "${GOOGLE_SA_JSON_PATH}"
+      impersonate_email: "ops@spacelions.com"
+      domain: "spacelions.com"
+  notion:
+    enabled: true
+    auth:
+      token: "${NOTION_INTEGRATION_TOKEN}"
+    resources:
+      onboarding_tracker: "${NOTION_ONBOARDING_DB_ID}"
+  slack:
+    enabled: false
+    auth:
+      bot_token: "${SLACK_BOT_TOKEN}"
+      app_token: "${SLACK_APP_TOKEN}" # Socket Mode: no ngrok/HTTPS needed locally
+    resources:
+      it_ops_channel: "${SLACK_IT_OPS_CHANNEL_ID}"

@@ -1,0 +1,63 @@
+version: "0.5"
+
+log_level: info
+
+processes:
+  postgres:
+    command: bash ./scripts/dev-postgres.sh
+    readiness_probe:
+      exec:
+        command: pg_isready -h 127.0.0.1 -p ${PGPORT:-54329} -U ${PGUSER:-postgres}
+      initial_delay_seconds: 1
+      period_seconds: 2
+      timeout_seconds: 3
+      failure_threshold: 15
+    shutdown:
+      # SIGINT triggers PostgreSQL fast shutdown cleanly with no stale lock files
+      signal: 2
+      timeout_seconds: 10
+
+  postgres-init:
+    command: >-
+      sh -c 'psql -h 127.0.0.1 -p ${PGPORT:-54329} -U ${PGUSER:-postgres} -d postgres -tc "SELECT 1 FROM pg_database WHERE datname = '\''eunomia'\''" | grep -q 1 || createdb -h 127.0.0.1 -p ${PGPORT:-54329} -U ${PGUSER:-postgres} eunomia'
+    depends_on:
+      postgres:
+        condition: process_healthy
+    availability:
+      restart: "no"
+
+  temporal:
+    command: >-
+      sh -c 'mkdir -p .dev && exec temporal server start-dev --ip 127.0.0.1 --port 7233 --ui-port 8233 --db-filename .dev/temporal.db'
+    readiness_probe:
+      http_get:
+        host: 127.0.0.1
+        port: 8233
+        path: /
+      initial_delay_seconds: 1
+      period_seconds: 2
+      timeout_seconds: 3
+      failure_threshold: 20
+    shutdown:
+      signal: 2
+      timeout_seconds: 10
+
+  eunomia:
+    command: go run ./cmd/eunomia
+    depends_on:
+      postgres-init:
+        condition: process_completed_successfully
+      temporal:
+        condition: process_healthy
+    readiness_probe:
+      http_get:
+        host: 127.0.0.1
+        port: 8080
+        path: /healthz
+      initial_delay_seconds: 1
+      period_seconds: 2
+      timeout_seconds: 3
+      failure_threshold: 20
+    shutdown:
+      signal: 2
+      timeout_seconds: 10
