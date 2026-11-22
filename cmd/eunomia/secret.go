@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -10,11 +11,32 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+	"github.com/uptrace/bun"
 
 	"github.com/spacelions/eunomia/internal/config"
 	"github.com/spacelions/eunomia/internal/db"
 	"github.com/spacelions/eunomia/internal/secrets"
 )
+
+func openSecretContext(ctx context.Context, v *viper.Viper, tenantFlag string) (tenant string, database *bun.DB, wrapper *secrets.LocalKeyWrapper, provider *secrets.DBSecretProvider, err error) {
+	cfg, err := config.LoadForSecretsFromViper(v)
+	if err != nil {
+		return "", nil, nil, nil, err
+	}
+	tenant = tenantFlag
+	if tenant == "" {
+		tenant = cfg.DefaultTenant
+	}
+	wrapper, err = secrets.ParseLocalKeyWrapper(cfg.MasterKeys)
+	if err != nil {
+		return "", nil, nil, nil, err
+	}
+	database, err = db.Open(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return "", nil, nil, nil, err
+	}
+	return tenant, database, wrapper, secrets.NewDBSecretProvider(database, wrapper), nil
+}
 
 func newSecretCmd(v *viper.Viper) *cobra.Command {
 	secretCmd := &cobra.Command{
@@ -59,18 +81,12 @@ func newSecretSetCmd(v *viper.Viper) *cobra.Command {
 		Use:   "set",
 		Short: "Store or update a tenant secret (reads value from --file or stdin, never CLI args)",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			cfg, err := config.LoadForSecretsFromViper(v)
-			if err != nil {
-				return err
-			}
-			if tenant == "" {
-				tenant = cfg.DefaultTenant
-			}
 			if connector == "" || key == "" {
 				return errors.New("--connector and --key are required")
 			}
 
 			var val []byte
+			var err error
 			if filePath != "" {
 				val, err = os.ReadFile(filePath)
 				if err != nil {
@@ -89,21 +105,16 @@ func newSecretSetCmd(v *viper.Viper) *cobra.Command {
 				return errors.New("secret value is empty")
 			}
 
-			wrapper, err := secrets.ParseLocalKeyWrapper(cfg.MasterKeys)
-			if err != nil {
-				return err
-			}
-			database, err := db.Open(cmd.Context(), cfg.DatabaseURL)
+			resolvedTenant, database, wrapper, provider, err := openSecretContext(cmd.Context(), v, tenant)
 			if err != nil {
 				return err
 			}
 			defer func() { _ = database.Close() }()
 
-			provider := secrets.NewDBSecretProvider(database, wrapper)
-			if err := provider.Set(cmd.Context(), tenant, connector, key, val); err != nil {
+			if err := provider.Set(cmd.Context(), resolvedTenant, connector, key, val); err != nil {
 				return err
 			}
-			_, err = fmt.Fprintf(cmd.OutOrStdout(), "Stored secret %s/%s/%s (key_id=%s)\n", tenant, connector, key, wrapper.ActiveKeyID())
+			_, err = fmt.Fprintf(cmd.OutOrStdout(), "Stored secret %s/%s/%s (key_id=%s)\n", resolvedTenant, connector, key, wrapper.ActiveKeyID())
 			return err
 		},
 	}
@@ -123,26 +134,13 @@ func newSecretListCmd(v *viper.Viper) *cobra.Command {
 		Use:   "list",
 		Short: "List stored secret metadata for a tenant (never prints values)",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			cfg, err := config.LoadForSecretsFromViper(v)
-			if err != nil {
-				return err
-			}
-			if tenant == "" {
-				tenant = cfg.DefaultTenant
-			}
-
-			wrapper, err := secrets.ParseLocalKeyWrapper(cfg.MasterKeys)
-			if err != nil {
-				return err
-			}
-			database, err := db.Open(cmd.Context(), cfg.DatabaseURL)
+			resolvedTenant, database, _, provider, err := openSecretContext(cmd.Context(), v, tenant)
 			if err != nil {
 				return err
 			}
 			defer func() { _ = database.Close() }()
 
-			provider := secrets.NewDBSecretProvider(database, wrapper)
-			items, err := provider.List(cmd.Context(), tenant)
+			items, err := provider.List(cmd.Context(), resolvedTenant)
 			if err != nil {
 				return err
 			}
@@ -167,32 +165,20 @@ func newSecretDeleteCmd(v *viper.Viper) *cobra.Command {
 		Use:   "delete",
 		Short: "Delete a stored tenant secret",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			cfg, err := config.LoadForSecretsFromViper(v)
-			if err != nil {
-				return err
-			}
-			if tenant == "" {
-				tenant = cfg.DefaultTenant
-			}
 			if connector == "" || key == "" {
 				return errors.New("--connector and --key are required")
 			}
 
-			wrapper, err := secrets.ParseLocalKeyWrapper(cfg.MasterKeys)
-			if err != nil {
-				return err
-			}
-			database, err := db.Open(cmd.Context(), cfg.DatabaseURL)
+			resolvedTenant, database, _, provider, err := openSecretContext(cmd.Context(), v, tenant)
 			if err != nil {
 				return err
 			}
 			defer func() { _ = database.Close() }()
 
-			provider := secrets.NewDBSecretProvider(database, wrapper)
-			if err := provider.Delete(cmd.Context(), tenant, connector, key); err != nil {
+			if err := provider.Delete(cmd.Context(), resolvedTenant, connector, key); err != nil {
 				return err
 			}
-			_, err = fmt.Fprintf(cmd.OutOrStdout(), "Deleted secret %s/%s/%s\n", tenant, connector, key)
+			_, err = fmt.Fprintf(cmd.OutOrStdout(), "Deleted secret %s/%s/%s\n", resolvedTenant, connector, key)
 			return err
 		},
 	}
@@ -208,21 +194,12 @@ func newSecretRotateCmd(v *viper.Viper) *cobra.Command {
 		Use:   "rotate-master-key",
 		Short: "Re-wrap all stored secret DEKs to the active key in EUNOMIA_MASTER_KEYS",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			cfg, err := config.LoadForSecretsFromViper(v)
-			if err != nil {
-				return err
-			}
-			wrapper, err := secrets.ParseLocalKeyWrapper(cfg.MasterKeys)
-			if err != nil {
-				return err
-			}
-			database, err := db.Open(cmd.Context(), cfg.DatabaseURL)
+			_, database, wrapper, provider, err := openSecretContext(cmd.Context(), v, "")
 			if err != nil {
 				return err
 			}
 			defer func() { _ = database.Close() }()
 
-			provider := secrets.NewDBSecretProvider(database, wrapper)
 			count, err := provider.RotateMasterKey(cmd.Context())
 			if err != nil {
 				return err

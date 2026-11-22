@@ -106,3 +106,30 @@ func TestGRPCHealthCheck_ServingAndNotServing(t *testing.T) {
 	checkConnectJSON("SERVING_STATUS_NOT_SERVING")
 	checkBinaryGRPC(2)
 }
+
+func TestNewHTTPServerAndNilReadiness(t *testing.T) {
+	h := NewHandler(nil)
+	srv := NewHTTPServer("127.0.0.1:0", h)
+	if srv.Addr != "127.0.0.1:0" || srv.Handler == nil {
+		t.Fatalf("unexpected server config: %+v", srv)
+	}
+
+	ts := httptest.NewUnstartedServer(h)
+	ts.EnableHTTP2 = true
+	ts.Start()
+	defer ts.Close()
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, ts.URL+"/"+grpchealth.HealthV1ServiceName+"/Check", bytes.NewReader([]byte(`{}`)))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := ts.Client().Do(req)
+	if err != nil {
+		t.Fatalf("do request: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 with nil readiness check, got %d", resp.StatusCode)
+	}
+}

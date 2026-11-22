@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -122,10 +123,15 @@ func runServe(parentCtx context.Context, v *viper.Viper) error {
 	})
 	srv := server.NewHTTPServer(cfg.GRPCAddr, handler)
 
+	ln, err := net.Listen("tcp", cfg.GRPCAddr)
+	if err != nil {
+		return fmt.Errorf("listening on %s: %w", cfg.GRPCAddr, err)
+	}
+
 	errCh := make(chan error, 1)
 	go func() {
-		logger.Info("eunomia ConnectRPC server listening", "addr", cfg.GRPCAddr)
-		if serveErr := srv.ListenAndServe(); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+		logger.Info("eunomia ConnectRPC server listening", "addr", ln.Addr().String())
+		if serveErr := srv.Serve(ln); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
 			errCh <- serveErr
 		}
 		close(errCh)

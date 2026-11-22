@@ -34,6 +34,7 @@
             buf
             grpcurl
             grpc-health-probe
+            lefthook
           ];
 
           shellHook = ''
@@ -73,6 +74,12 @@
                 echo "🔑 Generated local dev master key at .dev/master.key (gitignored)"
               fi
               export EUNOMIA_MASTER_KEYS="$(cat "$EUNOMIA_ROOT/.dev/master.key")"
+            fi
+
+            if [ -d "$EUNOMIA_ROOT/.git" ] && [ -f "$EUNOMIA_ROOT/lefthook.yml" ]; then
+              if ! grep -q "lefthook" "$EUNOMIA_ROOT/.git/hooks/pre-commit" 2>/dev/null; then
+                (cd "$EUNOMIA_ROOT" && lefthook install >/dev/null 2>&1) || true
+              fi
             fi
 
             echo "🚀 Eunomia dev shell ready ($(go version | awk '{print $3}'), $(postgres --version | awk '{print $1, $3}'), $(temporal --version | head -n1))"

@@ -100,11 +100,7 @@ func (w *LocalKeyWrapper) Wrap(_ context.Context, dek []byte) (string, []byte, e
 	if len(dek) != keyBytes {
 		return "", nil, fmt.Errorf("dek must be %d bytes, got %d", keyBytes, len(dek))
 	}
-	kek := w.keys[w.activeID]
-	gcm, err := newGCM(kek)
-	if err != nil {
-		return "", nil, err
-	}
+	gcm := mustGCM(w.keys[w.activeID])
 	nonce := make([]byte, gcm.NonceSize())
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
 		return "", nil, fmt.Errorf("generating wrap nonce: %w", err)
@@ -119,10 +115,7 @@ func (w *LocalKeyWrapper) Unwrap(_ context.Context, keyID string, wrappedDEK []b
 	if !ok {
 		return nil, fmt.Errorf("unknown master key id %q", keyID)
 	}
-	gcm, err := newGCM(kek)
-	if err != nil {
-		return nil, err
-	}
+	gcm := mustGCM(kek)
 	ns := gcm.NonceSize()
 	if len(wrappedDEK) <= ns {
 		return nil, errors.New("wrapped DEK is truncated")
@@ -138,14 +131,15 @@ func (w *LocalKeyWrapper) Unwrap(_ context.Context, keyID string, wrappedDEK []b
 	return dek, nil
 }
 
-func newGCM(key []byte) (cipher.AEAD, error) {
+// mustGCM creates an AES-256-GCM AEAD from a pre-validated 32-byte key.
+func mustGCM(key []byte) cipher.AEAD {
 	block, err := aes.NewCipher(key)
 	if err != nil {
-		return nil, fmt.Errorf("creating AES cipher: %w", err)
+		panic(err)
 	}
 	gcm, err := cipher.NewGCM(block)
 	if err != nil {
-		return nil, fmt.Errorf("creating GCM: %w", err)
+		panic(err)
 	}
-	return gcm, nil
+	return gcm
 }

@@ -72,10 +72,7 @@ func EncryptEnvelope(ctx context.Context, wrapper KeyWrapper, tenantID, connecto
 	}
 	defer zeroBytes(dek)
 
-	gcm, err := newGCM(dek)
-	if err != nil {
-		return nil, err
-	}
+	gcm := mustGCM(dek)
 	nonce := make([]byte, gcm.NonceSize())
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
 		return nil, fmt.Errorf("generating secret nonce: %w", err)
@@ -107,10 +104,7 @@ func DecryptEnvelope(ctx context.Context, wrapper KeyWrapper, tenantID, connecto
 	}
 	defer zeroBytes(dek)
 
-	gcm, err := newGCM(dek)
-	if err != nil {
-		return nil, err
-	}
+	gcm := mustGCM(dek)
 	plaintext, err := gcm.Open(nil, env.Nonce, env.Ciphertext, secretAAD(tenantID, connector, key))
 	if err != nil {
 		return nil, fmt.Errorf("decrypting secret %s/%s/%s: %w", tenantID, connector, key, err)
