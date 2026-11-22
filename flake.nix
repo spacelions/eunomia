@@ -31,6 +31,10 @@
             postgresql
             temporal-cli
             process-compose
+            buf
+            grpcurl
+            grpc-health-probe
+            lefthook
           ];
 
           shellHook = ''
@@ -45,16 +49,37 @@
             export PGDATABASE="eunomia"
             export PGDATA="$EUNOMIA_ROOT/.dev/pgdata"
             export PC_PORT_NUM="8089"
+
+            export EUNOMIA_GRPC_ADDR="127.0.0.1:8080"
             export EUNOMIA_DATABASE_URL="postgres://postgres@127.0.0.1:54329/eunomia?sslmode=disable"
             export EUNOMIA_TEMPORAL_ADDR="127.0.0.1:7233"
-            export EUNOMIA_HTTP_ADDR="127.0.0.1:8080"
-            export EUNOMIA_CONFIG_PATH="$EUNOMIA_ROOT/configs/connectors.yaml"
+            export EUNOMIA_TEMPORAL_NAMESPACE="default"
+            export EUNOMIA_TEMPORAL_TASK_QUEUE="eunomia"
+            export EUNOMIA_DEFAULT_TENANT="spacelions"
 
             if [ -f "$EUNOMIA_ROOT/.env" ]; then
               set -a
               # shellcheck disable=SC1091
               source "$EUNOMIA_ROOT/.env"
               set +a
+            fi
+
+            # Zero-touch local dev master key (gitignored in .dev/master.key).
+            # Production MUST set EUNOMIA_MASTER_KEYS explicitly; Go fails fast if unset.
+            if [ -z "''${EUNOMIA_MASTER_KEYS:-}" ]; then
+              mkdir -p "$EUNOMIA_ROOT/.dev"
+              if [ ! -f "$EUNOMIA_ROOT/.dev/master.key" ]; then
+                umask 077
+                printf 'v1:%s\n' "$(head -c 32 /dev/urandom | base64 | tr -d '\n')" > "$EUNOMIA_ROOT/.dev/master.key"
+                echo "🔑 Generated local dev master key at .dev/master.key (gitignored)"
+              fi
+              export EUNOMIA_MASTER_KEYS="$(cat "$EUNOMIA_ROOT/.dev/master.key")"
+            fi
+
+            if [ -d "$EUNOMIA_ROOT/.git" ] && [ -f "$EUNOMIA_ROOT/lefthook.yml" ]; then
+              if ! grep -q "lefthook" "$EUNOMIA_ROOT/.git/hooks/pre-commit" 2>/dev/null; then
+                (cd "$EUNOMIA_ROOT" && lefthook install >/dev/null 2>&1) || true
+              fi
             fi
 
             echo "🚀 Eunomia dev shell ready ($(go version | awk '{print $3}'), $(postgres --version | awk '{print $1, $3}'), $(temporal --version | head -n1))"

@@ -1,0 +1,18 @@
+pre-commit:
+  parallel: false
+  commands:
+    gofmt:
+      glob: "*.go"
+      run: |
+        UNFORMATTED=$(gofmt -l {staged_files})
+        if [ -n "$UNFORMATTED" ]; then
+          echo "The following Go files are not gofmt-formatted:"
+          echo "$UNFORMATTED"
+          exit 1
+        fi
+    go-vet:
+      glob: "*.go"
+      run: bash ./scripts/check-coverage.sh --vet-only
+    test-coverage:
+      glob: "*.{go,sql}"
+      run: bash ./scripts/check-coverage.sh

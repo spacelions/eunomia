@@ -26,6 +26,14 @@ processes:
     availability:
       restart: "no"
 
+  eunomia-migrate:
+    command: go run ./cmd/eunomia migrate
+    depends_on:
+      postgres-init:
+        condition: process_completed_successfully
+    availability:
+      restart: "no"
+
   temporal:
     command: >-
       sh -c 'mkdir -p .dev && exec temporal server start-dev --ip 127.0.0.1 --port 7233 --ui-port 8233 --db-filename .dev/temporal.db'
@@ -43,17 +51,15 @@ processes:
       timeout_seconds: 10
 
   eunomia:
-    command: go run ./cmd/eunomia
+    command: go run ./cmd/eunomia serve
     depends_on:
-      postgres-init:
+      eunomia-migrate:
         condition: process_completed_successfully
       temporal:
         condition: process_healthy
     readiness_probe:
-      http_get:
-        host: 127.0.0.1
-        port: 8080
-        path: /healthz
+      exec:
+        command: grpc-health-probe -addr=${EUNOMIA_GRPC_ADDR:-127.0.0.1:8080}
       initial_delay_seconds: 1
       period_seconds: 2
       timeout_seconds: 3
