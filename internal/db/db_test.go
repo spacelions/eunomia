@@ -29,7 +29,16 @@ func TestMigrate_Idempotent(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, group2.IsZero(), "expected zero migrations on second run")
 
-	for _, table := range []string{"tenant_connectors", "tenant_secrets", "actors", "actor_identities"} {
+	for _, table := range []string{
+		"tenant_connectors",
+		"tenant_secrets",
+		"actors",
+		"actor_identities",
+		"playbooks",
+		"playbook_drafts",
+		"case_runs",
+		"interaction_tasks",
+	} {
 		var exists bool
 		err := database.QueryRowContext(ctx,
 			`SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = ?)`,
