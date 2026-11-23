@@ -7,6 +7,7 @@ const (
 	NodeSequence      NodeType = "sequence"
 	NodeParallel      NodeType = "parallel"
 	NodeSwitch        NodeType = "switch"
+	NodeWait          NodeType = "wait"
 	NodeAction        NodeType = "action"
 	NodeInteraction   NodeType = "interaction"
 	NodeAgent         NodeType = "agent"
@@ -22,6 +23,7 @@ type Node struct {
 	Sequence      *SequenceSpec      `json:"sequence,omitempty"`
 	Parallel      *ParallelSpec      `json:"parallel,omitempty"`
 	Switch        *SwitchSpec        `json:"switch,omitempty"`
+	Wait          *WaitSpec          `json:"wait,omitempty"`
 	Action        *ActionSpec        `json:"action,omitempty"`
 	Interaction   *InteractionSpec   `json:"interaction,omitempty"`
 	Agent         *AgentSpec         `json:"agent,omitempty"`
@@ -50,9 +52,18 @@ type SwitchCase struct {
 	Node Node   `json:"node"`
 }
 
+// WaitSpec durably pauses execution via Temporal timer for either a fixed Duration
+// (e.g., "168h") or Until an RFC3339 timestamp ValueExpr (e.g., state.start_date).
+// Exactly one of Duration or Until must be set.
+type WaitSpec struct {
+	Duration string     `json:"duration,omitempty"`
+	Until    *ValueExpr `json:"until,omitempty"`
+}
+
 // ActionSpec executes a deterministic, idempotent Connector call keyed by runID:stepID.
 // When Archetype is "observer", the step represents a non-blocking push (e.g., Notion/Gmail).
 // When Operation is "http", HTTP holds a build-time AI-compiled declarative HTTP call.
+// Optional OnError provides a fallback AST branch (e.g., IT Ops fulfiller) on non-retryable failure.
 type ActionSpec struct {
 	Archetype Archetype            `json:"archetype,omitempty"`
 	Connector string               `json:"connector"`
@@ -62,16 +73,19 @@ type ActionSpec struct {
 	Inputs    map[string]ValueExpr `json:"inputs,omitempty"`
 	Outputs   map[string]string    `json:"outputs,omitempty"`
 	HTTP      *HTTPActionSpec      `json:"http,omitempty"`
+	OnError   *Node                `json:"on_error,omitempty"`
 }
 
 // HTTPActionSpec defines a build-time compiled deterministic HTTP request against a
-// tenant connector's pinned base_url (SSRF-safe: relative Path only, credentials injected at runtime).
+// tenant connector's pinned base_url (SSRF-safe: relative Path with URL-escaped {param}
+// placeholders only; credentials injected at runtime via DBSecretProvider).
 type HTTPActionSpec struct {
 	Method             string               `json:"method"`
 	Path               string               `json:"path"`
+	PathParams         map[string]ValueExpr `json:"path_params,omitempty"`
 	Headers            map[string]ValueExpr `json:"headers,omitempty"`
 	Query              map[string]ValueExpr `json:"query,omitempty"`
-	Body               map[string]ValueExpr `json:"body,omitempty"`
+	Body               *ValueExpr           `json:"body,omitempty"`
 	IdempotencyHeader  string               `json:"idempotency_header,omitempty"`
 	SuccessStatuses    []int                `json:"success_statuses,omitempty"`
 	IdempotentStatuses []int                `json:"idempotent_statuses,omitempty"`

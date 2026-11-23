@@ -16,6 +16,7 @@ import (
 var (
 	workflowIDRe = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
 	stepIDRe     = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
+	pathParamRe  = regexp.MustCompile(`\{([a-z][a-z0-9_]*)\}`)
 )
 
 // ParseJSON strictly decodes a WorkflowDef JSON document (rejecting unknown fields and trailing data)
@@ -94,6 +95,12 @@ func walkNode(n *Node, fn func(*Node) error) error {
 				if err := walkNode(n.Switch.Default, fn); err != nil {
 					return err
 				}
+			}
+		}
+	case NodeAction:
+		if n.Action != nil && n.Action.OnError != nil {
+			if err := walkNode(n.Action.OnError, fn); err != nil {
+				return err
 			}
 		}
 	case NodeInteraction:
@@ -189,6 +196,9 @@ func countPopulatedSpecs(n *Node) int {
 	if n.Switch != nil {
 		count++
 	}
+	if n.Wait != nil {
+		count++
+	}
 	if n.Action != nil {
 		count++
 	}
@@ -242,6 +252,12 @@ func validateNodeSpec(n *Node, state StateSchema) error {
 		}
 		return nil
 
+	case NodeWait:
+		if n.Wait == nil {
+			return errors.New("type wait requires wait block")
+		}
+		return validateWaitSpec(n.Wait)
+
 	case NodeAction:
 		if n.Action == nil {
 			return errors.New("type action requires action block")
@@ -269,6 +285,24 @@ func validateNodeSpec(n *Node, state StateSchema) error {
 	default:
 		return fmt.Errorf("unsupported node type %q", n.Type)
 	}
+}
+
+func validateWaitSpec(ws *WaitSpec) error {
+	hasDuration := strings.TrimSpace(ws.Duration) != ""
+	hasUntil := ws.Until != nil
+	if hasDuration == hasUntil {
+		return errors.New("wait must set exactly one of duration or until")
+	}
+	if hasDuration {
+		if d, err := time.ParseDuration(ws.Duration); err != nil || d <= 0 {
+			return fmt.Errorf("wait.duration %q must be a positive duration", ws.Duration)
+		}
+		return nil
+	}
+	if err := ws.Until.Validate(); err != nil {
+		return fmt.Errorf("wait.until: %w", err)
+	}
+	return nil
 }
 
 func validateActionSpec(a *ActionSpec, state StateSchema) error {
@@ -324,6 +358,24 @@ func validateHTTPActionSpec(h *HTTPActionSpec, state StateSchema) error {
 		errs = append(errs, fmt.Errorf("http.path %q must be a relative path starting with '/' (no scheme/host allowed)", h.Path))
 	}
 
+	// Ensure every {param} placeholder in Path has a matching PathParams entry and vice versa.
+	placeholders := make(map[string]struct{})
+	for _, m := range pathParamRe.FindAllStringSubmatch(h.Path, -1) {
+		name := m[1]
+		placeholders[name] = struct{}{}
+		if _, ok := h.PathParams[name]; !ok {
+			errs = append(errs, fmt.Errorf("http.path placeholder {%s} is missing from http.path_params", name))
+		}
+	}
+	for k, v := range h.PathParams {
+		if _, ok := placeholders[k]; !ok {
+			errs = append(errs, fmt.Errorf("http.path_params.%s is not referenced in http.path %q", k, h.Path))
+		}
+		if err := v.Validate(); err != nil {
+			errs = append(errs, fmt.Errorf("http.path_params.%s: %w", k, err))
+		}
+	}
+
 	for k, v := range h.Headers {
 		if err := v.Validate(); err != nil {
 			errs = append(errs, fmt.Errorf("http.headers.%s: %w", k, err))
@@ -334,9 +386,9 @@ func validateHTTPActionSpec(h *HTTPActionSpec, state StateSchema) error {
 			errs = append(errs, fmt.Errorf("http.query.%s: %w", k, err))
 		}
 	}
-	for k, v := range h.Body {
-		if err := v.Validate(); err != nil {
-			errs = append(errs, fmt.Errorf("http.body.%s: %w", k, err))
+	if h.Body != nil {
+		if err := h.Body.Validate(); err != nil {
+			errs = append(errs, fmt.Errorf("http.body: %w", err))
 		}
 	}
 	for stateKey, expr := range h.Extract {

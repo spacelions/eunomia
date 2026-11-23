@@ -168,8 +168,10 @@ func TestValueExpr_JSONRoundTripAndValidation(t *testing.T) {
 	}
 }
 
-func TestCompiledHTTPAction_Approver_Agent_ChildWorkflow_AndSwitchDefault(t *testing.T) {
+func TestCompiledHTTPAction_Wait_OnError_Approver_Agent_ChildWorkflow_AndSwitchDefault(t *testing.T) {
 	p := workflow.Expr("'Approve welcome draft for ' + state.customer")
+	bodyExpr := workflow.Expr(`{"input":{"title":"Onboard " + state.customer,"labels":["onboarding"]}}`)
+	untilExpr := workflow.Expr("state.start_date")
 	def := &workflow.WorkflowDef{
 		SchemaVersion: workflow.SchemaVersionV1,
 		WorkflowID:    "b2b-customer-onboarding",
@@ -178,11 +180,13 @@ func TestCompiledHTTPAction_Approver_Agent_ChildWorkflow_AndSwitchDefault(t *tes
 		Owner:         "role:csm",
 		Trigger: workflow.TriggerSpec{
 			Archetype: workflow.ArchetypeRequestor,
-			InputKeys: []string{"customer", "tier"},
+			InputKeys: []string{"customer", "tier", "start_date", "team_id"},
 		},
 		State: workflow.StateSchema{
 			"customer":   {Type: workflow.FieldTypeString},
 			"tier":       {Type: workflow.FieldTypeEnum, Options: []string{"pro", "enterprise"}},
+			"start_date": {Type: workflow.FieldTypeDate},
+			"team_id":    {Type: workflow.FieldTypeString},
 			"ticket_url": {Type: workflow.FieldTypeString},
 			"draft_body": {Type: workflow.FieldTypeString},
 			"sso_ready":  {Type: workflow.FieldTypeBool},
@@ -194,6 +198,14 @@ func TestCompiledHTTPAction_Approver_Agent_ChildWorkflow_AndSwitchDefault(t *tes
 			Sequence: &workflow.SequenceSpec{
 				Steps: []workflow.Node{
 					{
+						ID:   "wait_until_start",
+						Name: "Wait Until Customer Start Date",
+						Type: workflow.NodeWait,
+						Wait: &workflow.WaitSpec{
+							Until: &untilExpr,
+						},
+					},
+					{
 						ID:   "create_linear_ticket",
 						Name: "Create Linear Ticket via Compiled HTTP",
 						Type: workflow.NodeAction,
@@ -202,16 +214,17 @@ func TestCompiledHTTPAction_Approver_Agent_ChildWorkflow_AndSwitchDefault(t *tes
 							Operation: "http",
 							HTTP: &workflow.HTTPActionSpec{
 								Method: "POST",
-								Path:   "/graphql",
+								Path:   "/v1/teams/{team_id}/issues",
+								PathParams: map[string]workflow.ValueExpr{
+									"team_id": workflow.Expr("state.team_id"),
+								},
 								Headers: map[string]workflow.ValueExpr{
 									"Content-Type": workflow.LiteralExpr("application/json"),
 								},
 								Query: map[string]workflow.ValueExpr{
 									"version": workflow.LiteralExpr("1"),
 								},
-								Body: map[string]workflow.ValueExpr{
-									"title": workflow.Expr("'Onboard ' + state.customer"),
-								},
+								Body:               &bodyExpr,
 								IdempotencyHeader:  "Idempotency-Key",
 								SuccessStatuses:    []int{200, 201},
 								IdempotentStatuses: []int{409},
@@ -220,6 +233,24 @@ func TestCompiledHTTPAction_Approver_Agent_ChildWorkflow_AndSwitchDefault(t *tes
 									"ticket_url": "body.data.issueCreate.issue.url",
 								},
 							},
+							OnError: &workflow.Node{
+								ID:   "manual_ticket_fallback",
+								Name: "Manual Ticket Fallback",
+								Type: workflow.NodeInteraction,
+								Interaction: &workflow.InteractionSpec{
+									Archetype: workflow.ArchetypeFulfiller,
+									Channel:   "gmail",
+									Assignee:  "role:it_ops",
+								},
+							},
+						},
+					},
+					{
+						ID:   "checkin_delay",
+						Name: "Wait 7 Days Before Check-in",
+						Type: workflow.NodeWait,
+						Wait: &workflow.WaitSpec{
+							Duration: "168h",
 						},
 					},
 					{
@@ -461,7 +492,27 @@ func TestValidateSyntax_Errors(t *testing.T) {
 			},
 		},
 		{
-			name: "http action SSRF absolute URL, bad method, bad exprs & extract",
+			name: "mismatched spec for wait",
+			root: workflow.Node{ID: "n", Name: "N", Type: workflow.NodeWait, Sequence: &workflow.SequenceSpec{}},
+		},
+		{
+			name: "wait missing both duration and until",
+			root: workflow.Node{ID: "n", Name: "N", Type: workflow.NodeWait, Wait: &workflow.WaitSpec{}},
+		},
+		{
+			name: "wait sets both duration and until",
+			root: workflow.Node{ID: "n", Name: "N", Type: workflow.NodeWait, Wait: &workflow.WaitSpec{Duration: "1h", Until: &emptyExpr}},
+		},
+		{
+			name: "wait invalid duration",
+			root: workflow.Node{ID: "n", Name: "N", Type: workflow.NodeWait, Wait: &workflow.WaitSpec{Duration: "-5m"}},
+		},
+		{
+			name: "wait invalid until expr",
+			root: workflow.Node{ID: "n", Name: "N", Type: workflow.NodeWait, Wait: &workflow.WaitSpec{Until: &emptyExpr}},
+		},
+		{
+			name: "http action SSRF absolute URL, bad method, mismatched path_params, bad exprs & extract",
 			root: workflow.Node{
 				ID:   "n",
 				Name: "N",
@@ -470,11 +521,14 @@ func TestValidateSyntax_Errors(t *testing.T) {
 					Connector: "linear",
 					Operation: "http",
 					HTTP: &workflow.HTTPActionSpec{
-						Method:  "TRACE",
-						Path:    "https://evil.com/steal",
+						Method: "TRACE",
+						Path:   "https://evil.com/steal/{missing_param}",
+						PathParams: map[string]workflow.ValueExpr{
+							"unused_param": emptyExpr,
+						},
 						Headers: map[string]workflow.ValueExpr{"h": emptyExpr},
 						Query:   map[string]workflow.ValueExpr{"q": emptyExpr},
-						Body:    map[string]workflow.ValueExpr{"b": emptyExpr},
+						Body:    &emptyExpr,
 						Extract: map[string]string{"undeclared": ""},
 					},
 				},
