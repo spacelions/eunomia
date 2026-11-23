@@ -199,70 +199,69 @@ func TestRecipientGuard_AllowsDirectoryAndTrustedExternal_BlocksHallucinated(t *
 	guard, err := actors.NewRecipientGuard(store, "spacelions", "alice.personal@gmail.com")
 	require.NoError(t, err)
 
-	// 1. Directory actor authorized by user_id and by email across gmail, email, slack_dm, notion, and arbitrary new providers like linear.
-	a, err := guard.Authorize(ctx, "fu", actors.ChannelGmail)
+	// 1. Directory actor authorized by user_id and email, and by any connector provider handle.
+	a, err := guard.Authorize(ctx, "fu")
 	require.NoError(t, err)
 	assert.False(t, a.External)
 	assert.Equal(t, "fu@spacelions.com", a.Email)
 
-	a, err = guard.Authorize(ctx, "fu", actors.ChannelEmail)
+	a, handle, err := guard.AuthorizeHandle(ctx, "fu@spacelions.com", "slack")
 	require.NoError(t, err)
-	assert.Equal(t, "fu@spacelions.com", a.Email)
+	assert.Equal(t, "fu", a.UserID)
+	assert.Equal(t, "U_FU", handle)
 
-	a, err = guard.Authorize(ctx, "fu@spacelions.com", actors.ChannelSlackDM)
+	_, handle, err = guard.AuthorizeHandle(ctx, "fu", "notion")
 	require.NoError(t, err)
-	assert.Equal(t, "U_FU", a.Handle("slack"))
+	assert.Equal(t, "N_FU", handle)
 
-	a, err = guard.Authorize(ctx, "fu", actors.ChannelNotion)
+	_, handle, err = guard.AuthorizeHandle(ctx, "fu", "linear")
 	require.NoError(t, err)
-	assert.Equal(t, "N_FU", a.Handle("notion"))
+	assert.Equal(t, "LIN_FU", handle)
 
-	a, err = guard.Authorize(ctx, "fu", "linear")
-	require.NoError(t, err)
-	assert.Equal(t, "LIN_FU", a.Handle("linear"))
+	// 2. Directory actor missing a provider handle fails with ErrMissingProviderHandle.
+	_, _, err = guard.AuthorizeHandle(ctx, "email_only", "slack")
+	require.ErrorIs(t, err, actors.ErrMissingProviderHandle)
+	_, _, err = guard.AuthorizeHandle(ctx, "email_only", "notion")
+	require.ErrorIs(t, err, actors.ErrMissingProviderHandle)
+	_, _, err = guard.AuthorizeHandle(ctx, "fu", "github")
+	require.ErrorIs(t, err, actors.ErrMissingProviderHandle)
 
-	// 2. Directory actor missing handles fails with ErrMissingChannelHandle (for Slack, Notion, or any future provider like github).
-	_, err = guard.Authorize(ctx, "email_only", actors.ChannelSlackDM)
-	require.ErrorIs(t, err, actors.ErrMissingChannelHandle)
-	_, err = guard.Authorize(ctx, "email_only", actors.ChannelNotion)
-	require.ErrorIs(t, err, actors.ErrMissingChannelHandle)
-	_, err = guard.Authorize(ctx, "fu", "github")
-	require.ErrorIs(t, err, actors.ErrMissingChannelHandle)
-
-	// 3. Trusted external email allowed for Gmail (External: true), blocked for connector channels.
-	ext, err := guard.Authorize(ctx, "ALICE.PERSONAL@gmail.com", actors.ChannelGmail)
+	// 3. Trusted external email allowed by Authorize (External: true), rejected by AuthorizeHandle.
+	ext, err := guard.Authorize(ctx, "ALICE.PERSONAL@gmail.com")
 	require.NoError(t, err)
 	assert.True(t, ext.External)
 	assert.Equal(t, "alice.personal@gmail.com", ext.Email)
 
-	_, err = guard.Authorize(ctx, "alice.personal@gmail.com", actors.ChannelSlackDM)
-	require.ErrorIs(t, err, actors.ErrMissingChannelHandle)
+	_, _, err = guard.AuthorizeHandle(ctx, "alice.personal@gmail.com", "slack")
+	require.ErrorIs(t, err, actors.ErrMissingProviderHandle)
 
 	// 4. Hallucinated / unauthorized email or unknown user_id MUST be rejected.
-	_, err = guard.Authorize(ctx, "attacker@evil.com", actors.ChannelGmail)
+	_, err = guard.Authorize(ctx, "attacker@evil.com")
 	require.ErrorIs(t, err, actors.ErrRecipientNotAllowed)
-	_, err = guard.Authorize(ctx, "ghost_user", actors.ChannelGmail)
+	_, err = guard.Authorize(ctx, "ghost_user")
 	require.ErrorIs(t, err, actors.ErrRecipientNotAllowed)
-	_, err = guard.Authorize(ctx, "", actors.ChannelGmail)
+	_, err = guard.Authorize(ctx, "")
 	require.ErrorIs(t, err, actors.ErrRecipientNotAllowed)
-	_, err = guard.Authorize(ctx, "bad@@email.com", actors.ChannelGmail)
+	_, err = guard.Authorize(ctx, "bad@@email.com")
+	require.ErrorIs(t, err, actors.ErrRecipientNotAllowed)
+	_, _, err = guard.AuthorizeHandle(ctx, "attacker@evil.com", "slack")
 	require.ErrorIs(t, err, actors.ErrRecipientNotAllowed)
 
 	// 5. Dynamically adding a newly provisioned work email allows contacting it.
 	require.NoError(t, guard.AllowEmail("alice@spacelions.com"))
-	work, err := guard.Authorize(ctx, "alice@spacelions.com", actors.ChannelGmail)
+	work, err := guard.Authorize(ctx, "alice@spacelions.com")
 	require.NoError(t, err)
 	assert.Equal(t, "alice@spacelions.com", work.Email)
 
-	// 6. Empty channel rejected.
-	_, err = guard.Authorize(ctx, "fu", "   ")
+	// 6. Empty provider rejected.
+	_, _, err = guard.AuthorizeHandle(ctx, "fu", "   ")
 	require.Error(t, err)
 
 	// 7. DB error propagates cleanly instead of masking as not allowed.
 	canceledCtx, cancel := context.WithCancel(ctx)
 	cancel()
-	_, err = guard.Authorize(canceledCtx, "fu", actors.ChannelGmail)
+	_, err = guard.Authorize(canceledCtx, "fu")
 	require.Error(t, err)
-	_, err = guard.Authorize(canceledCtx, "fu@spacelions.com", actors.ChannelGmail)
+	_, err = guard.Authorize(canceledCtx, "fu@spacelions.com")
 	require.Error(t, err)
 }

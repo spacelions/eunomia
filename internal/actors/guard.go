@@ -8,22 +8,14 @@ import (
 	"sync"
 )
 
-const (
-	ChannelEmail   = "email"
-	ChannelGmail   = "gmail"
-	ChannelSlack   = "slack"
-	ChannelSlackDM = "slack_dm"
-	ChannelNotion  = "notion"
-)
-
 var (
 	// ErrRecipientNotAllowed is returned when an agent attempts to contact an address
 	// that is neither in the tenant's actors directory nor explicitly authorized for this run.
 	ErrRecipientNotAllowed = errors.New("recipient not allowed")
 
-	// ErrMissingChannelHandle is returned when a verified actor lacks the contact ID
-	// required for the requested channel (e.g., a "slack" or "linear" handle in actor_identities).
-	ErrMissingChannelHandle = errors.New("actor missing required channel handle")
+	// ErrMissingProviderHandle is returned when a verified actor lacks an external identity
+	// for the requested connector provider in actor_identities.
+	ErrMissingProviderHandle = errors.New("actor missing required provider handle")
 )
 
 // Directory abstracts the read-only actor lookups needed by RecipientGuard.
@@ -32,7 +24,7 @@ type Directory interface {
 	GetByEmail(ctx context.Context, tenantID, email string) (*Actor, error)
 }
 
-// RecipientGuard enforces the Recipient Allowlist Guardrail: outbound emails and
+// RecipientGuard enforces the Recipient Allowlist Guardrail: outbound messages and
 // Magic Links may only target verified actors from the tenant's directory OR external
 // emails explicitly registered from the run's trigger inputs / prior connector outputs.
 type RecipientGuard struct {
@@ -60,7 +52,7 @@ func NewRecipientGuard(dir Directory, tenantID string, initialExternalEmails ...
 }
 
 // AllowEmail registers an external email discovered from a trusted source
-// (e.g., trigger input or connector output such as google_workspace.create_user).
+// (e.g., trigger input or connector output such as a newly provisioned work account).
 func (g *RecipientGuard) AllowEmail(raw string) error {
 	norm, err := NormalizeEmail(raw)
 	if err != nil {
@@ -73,18 +65,13 @@ func (g *RecipientGuard) AllowEmail(raw string) error {
 }
 
 // Authorize resolves target (user_id or email) against the tenant's directory or the run's
-// external email allowlist and verifies the resolved actor supports the requested channel.
-//
-// Channel checks are provider-agnostic: "email"/"gmail" require Actor.Email, "slack_dm"
-// aliases to provider "slack", and any other provider name (e.g. "notion", "linear", "github")
-// requires a matching entry in Actor.Handles.
-func (g *RecipientGuard) Authorize(ctx context.Context, target, channel string) (*Actor, error) {
+// external email allowlist and returns the verified Actor (with a canonical Email).
+func (g *RecipientGuard) Authorize(ctx context.Context, target string) (*Actor, error) {
 	target = strings.TrimSpace(target)
 	if target == "" {
 		return nil, fmt.Errorf("%w: target is empty", ErrRecipientNotAllowed)
 	}
 
-	var actor *Actor
 	if strings.Contains(target, "@") {
 		norm, normErr := NormalizeEmail(target)
 		if normErr != nil {
@@ -92,57 +79,52 @@ func (g *RecipientGuard) Authorize(ctx context.Context, target, channel string) 
 		}
 		found, err := g.dir.GetByEmail(ctx, g.tenantID, norm)
 		if err == nil {
-			actor = found
-		} else if !errors.Is(err, ErrActorNotFound) {
-			return nil, err
-		} else {
-			g.mu.RLock()
-			_, allowed := g.allowedEmails[norm]
-			g.mu.RUnlock()
-			if !allowed {
-				return nil, fmt.Errorf("%w: %q is not in the actor directory or run allowlist", ErrRecipientNotAllowed, norm)
-			}
-			actor = &Actor{
-				TenantID: g.tenantID,
-				Email:    norm,
-				External: true,
-			}
+			return found, nil
 		}
-	} else {
-		found, err := g.dir.Get(ctx, g.tenantID, target)
-		if err != nil {
-			if errors.Is(err, ErrActorNotFound) {
-				return nil, fmt.Errorf("%w: user_id %q not found in directory", ErrRecipientNotAllowed, target)
-			}
+		if !errors.Is(err, ErrActorNotFound) {
 			return nil, err
 		}
-		actor = found
+
+		g.mu.RLock()
+		_, allowed := g.allowedEmails[norm]
+		g.mu.RUnlock()
+		if !allowed {
+			return nil, fmt.Errorf("%w: %q is not in the actor directory or run allowlist", ErrRecipientNotAllowed, norm)
+		}
+		return &Actor{
+			TenantID: g.tenantID,
+			Email:    norm,
+			External: true,
+		}, nil
 	}
 
-	if err := checkChannelHandle(actor, channel); err != nil {
+	found, err := g.dir.Get(ctx, g.tenantID, target)
+	if err != nil {
+		if errors.Is(err, ErrActorNotFound) {
+			return nil, fmt.Errorf("%w: user_id %q not found in directory", ErrRecipientNotAllowed, target)
+		}
 		return nil, err
 	}
-	return actor, nil
+	return found, nil
 }
 
-func checkChannelHandle(actor *Actor, channel string) error {
-	ch := NormalizeProvider(channel)
-	if ch == "" {
-		return errors.New("channel is required")
-	}
-	if ch == ChannelEmail || ch == ChannelGmail {
-		if actor.Email == "" {
-			return fmt.Errorf("%w: %q has no email for channel %q", ErrMissingChannelHandle, actor.UserID, channel)
-		}
-		return nil
+// AuthorizeHandle authorizes target and verifies the resolved actor has an external
+// identity handle for provider (e.g. "slack", "notion", "linear"), returning both
+// the Actor and the provider's external ID.
+func (g *RecipientGuard) AuthorizeHandle(ctx context.Context, target, provider string) (*Actor, string, error) {
+	prov := NormalizeProvider(provider)
+	if prov == "" {
+		return nil, "", errors.New("provider is required")
 	}
 
-	provider := ch
-	if provider == ChannelSlackDM {
-		provider = ChannelSlack
+	actor, err := g.Authorize(ctx, target)
+	if err != nil {
+		return nil, "", err
 	}
-	if actor.Handle(provider) == "" {
-		return fmt.Errorf("%w: %q has no %q handle for channel %q", ErrMissingChannelHandle, actor.Email, provider, channel)
+
+	handle := actor.Handle(prov)
+	if handle == "" {
+		return nil, "", fmt.Errorf("%w: %q has no %q handle", ErrMissingProviderHandle, actor.Email, prov)
 	}
-	return nil
+	return actor, handle, nil
 }
