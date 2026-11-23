@@ -6,6 +6,7 @@ require (
 	connectrpc.com/grpchealth v1.5.0
 	connectrpc.com/grpcreflect v1.3.1
 	github.com/google/go-cmp v0.7.0
+	github.com/oklog/ulid/v2 v2.1.2
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.1.0
 	github.com/spf13/viper v1.21.0
