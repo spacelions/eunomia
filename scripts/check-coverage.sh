@@ -39,6 +39,15 @@ TOTAL_PCT="$(echo "$TOTAL_LINE" | awk '{gsub(/%/, "", $3); print $3}')"
 
 echo "Total statement coverage: ${TOTAL_PCT}% (minimum required: ${MIN_COVERAGE}%)"
 
+if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+  {
+    echo "### Go Test Coverage"
+    echo ""
+    echo "- **Total statement coverage:** \`${TOTAL_PCT}%\`"
+    echo "- **Minimum required:** \`${MIN_COVERAGE}%\`"
+  } >> "$GITHUB_STEP_SUMMARY"
+fi
+
 awk -v got="$TOTAL_PCT" -v min="$MIN_COVERAGE" 'BEGIN {
   if (got + 0 < min + 0) {
     printf "FAIL: coverage %.1f%% is below required %.1f%%\n", got, min > "/dev/stderr"

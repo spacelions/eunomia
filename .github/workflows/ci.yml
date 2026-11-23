@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-and-coverage:
+    name: Format, Vet & Test Coverage (>=95%)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Setup Magic Nix Cache
+        uses: DeterminateSystems/magic-nix-cache-action@main
+
+      - name: Cache Go modules & build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ runner.os }}-go-${{ hashFiles('go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      - name: Check gofmt
+        run: |
+          nix develop --command bash -c '
+            set -euo pipefail
+            UNFORMATTED=$(gofmt -l .)
+            if [ -n "$UNFORMATTED" ]; then
+              echo "The following Go files are not gofmt-formatted:"
+              echo "$UNFORMATTED"
+              exit 1
+            fi
+          '
+
+      - name: Run go vet
+        run: nix develop --command bash ./scripts/check-coverage.sh --vet-only
+
+      - name: Run tests with race detector & enforce >=95% coverage
+        run: nix develop --command bash ./scripts/check-coverage.sh
