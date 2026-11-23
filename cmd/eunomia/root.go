@@ -43,7 +43,6 @@ func newRootCmd() *cobra.Command {
 		newMigrateCmd(v),
 		newSecretCmd(v),
 		newConnectorCmd(v),
-		newActorCmd(v),
 	)
 
 	return rootCmd

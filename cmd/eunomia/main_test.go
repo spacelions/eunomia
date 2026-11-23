@@ -213,53 +213,6 @@ func TestCLI_Migrate_Connector_Secret_AndServeLifecycle(t *testing.T) {
 
 	_, err = execCLI(ctx, "", "connector", "disable", "--type", "notion")
 	require.NoError(t, err)
-
-	// 5. Actor directory CLI: set, list, list --query, delete, and validation errors.
-	_, err = execCLI(ctx, "", "actor", "set")
-	require.Error(t, err)
-	_, err = execCLI(ctx, "", "actor", "set", "--user-id", "fu", "--name", "Fu", "--email", "fu@spacelions.com", "--handle", "bad-handle")
-	require.Error(t, err)
-	_, err = execCLI(ctx, "", "actor", "set", "--user-id", "fu", "--name", "Fu", "--email", "not-an-email")
-	require.Error(t, err)
-
-	actorOut, err := execCLI(ctx, "", "actor", "set",
-		"--user-id", "fu",
-		"--name", "Fu Zhang",
-		"--email", "fu@spacelions.com",
-		"--handle", "slack=U_FU",
-		"--handle", "notion=N_FU",
-		"--handle", "linear=LIN_FU",
-		"--role", "it_ops",
-		"--role", "people_ops",
-	)
-	require.NoError(t, err)
-	assert.Contains(t, actorOut, "Saved actor spacelions/fu")
-
-	_, err = execCLI(ctx, "", "actor", "set",
-		"--user-id", "alex",
-		"--name", "Alex Chen",
-		"--email", "alex@spacelions.com",
-		"--role", "it_ops",
-	)
-	require.NoError(t, err)
-
-	actorList, err := execCLI(ctx, "", "actor", "list")
-	require.NoError(t, err)
-	assert.Contains(t, actorList, "fu@spacelions.com")
-	assert.Contains(t, actorList, "it_ops,people_ops")
-	assert.Contains(t, actorList, "linear=LIN_FU,notion=N_FU,slack=U_FU")
-
-	actorSearch, err := execCLI(ctx, "", "actor", "list", "--query", "IT Ops")
-	require.NoError(t, err)
-	assert.Contains(t, actorSearch, "Fu Zhang")
-	assert.Contains(t, actorSearch, "Alex Chen")
-
-	_, err = execCLI(ctx, "", "actor", "delete")
-	require.Error(t, err)
-	_, err = execCLI(ctx, "", "actor", "delete", "--user-id", "fu")
-	require.NoError(t, err)
-	_, err = execCLI(ctx, "", "actor", "delete", "--user-id", "fu")
-	require.Error(t, err)
 }
 
 func TestCLI_BadConfigAndUnreachableDBErrors(t *testing.T) {
@@ -280,9 +233,6 @@ func TestCLI_BadConfigAndUnreachableDBErrors(t *testing.T) {
 		{"connector", "set", "--type", "notion"},
 		{"connector", "list"},
 		{"connector", "disable", "--type", "notion"},
-		{"actor", "set", "--user-id", "fu", "--name", "Fu", "--email", "fu@spacelions.com"},
-		{"actor", "list"},
-		{"actor", "delete", "--user-id", "fu"},
 	} {
 		_, err := execCLI(ctx, "v", args...)
 		assert.Error(t, err, "expected config error for %v", args)
@@ -297,9 +247,6 @@ func TestCLI_BadConfigAndUnreachableDBErrors(t *testing.T) {
 		{"connector", "set", "--type", "notion"},
 		{"connector", "list"},
 		{"connector", "disable", "--type", "notion"},
-		{"actor", "set", "--user-id", "fu", "--name", "Fu", "--email", "fu@spacelions.com"},
-		{"actor", "list"},
-		{"actor", "delete", "--user-id", "fu"},
 	} {
 		_, err := execCLI(ctx, "v", args...)
 		assert.Error(t, err, "expected unreachable DB error for %v", args)
