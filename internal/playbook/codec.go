@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -19,8 +20,8 @@ var (
 	identRe      = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
 )
 
-// ParseMarkdown parses a Markdown Playbook containing YAML frontmatter delimited by "---"
-// followed by the Markdown SOP instructions body, and validates all frontmatter rails.
+// ParseMarkdown parses a Markdown Playbook with YAML frontmatter delimited by "---",
+// applies safe defaults for MaxTurns/MaxDuration, and validates all guardrails.
 func ParseMarkdown(data []byte) (*Playbook, error) {
 	normalized := strings.ReplaceAll(string(data), "\r\n", "\n")
 	if !strings.HasPrefix(normalized, "---\n") {
@@ -43,30 +44,37 @@ func ParseMarkdown(data []byte) (*Playbook, error) {
 	dec := yaml.NewDecoder(strings.NewReader(fmRaw))
 	dec.KnownFields(true)
 
-	var fm Frontmatter
-	if err := dec.Decode(&fm); err != nil {
+	var meta Meta
+	if err := dec.Decode(&meta); err != nil {
 		return nil, fmt.Errorf("decoding playbook frontmatter: %w", err)
 	}
 
-	pb := &Playbook{
-		Frontmatter: fm,
-		Body:        body,
+	if meta.MaxTurns == 0 {
+		meta.MaxTurns = DefaultMaxTurns
 	}
-	if err := pb.ValidateSyntax(); err != nil {
+	if strings.TrimSpace(meta.MaxDuration) == "" {
+		meta.MaxDuration = DefaultMaxDuration
+	}
+
+	pb := &Playbook{
+		Meta: meta,
+		Body: body,
+	}
+	if err := pb.Validate(); err != nil {
 		return nil, err
 	}
 	return pb, nil
 }
 
-// RenderMarkdown validates and renders the Playbook back to canonical YAML frontmatter + Markdown.
+// RenderMarkdown validates and renders the Playbook to canonical YAML frontmatter + Markdown.
 func (p *Playbook) RenderMarkdown() ([]byte, error) {
-	if err := p.ValidateSyntax(); err != nil {
+	if err := p.Validate(); err != nil {
 		return nil, err
 	}
 	var fmBuf bytes.Buffer
 	enc := yaml.NewEncoder(&fmBuf)
 	enc.SetIndent(2)
-	if err := enc.Encode(&p.Frontmatter); err != nil {
+	if err := enc.Encode(&p.Meta); err != nil {
 		return nil, fmt.Errorf("encoding playbook frontmatter: %w", err)
 	}
 	_ = enc.Close()
@@ -81,17 +89,17 @@ func (p *Playbook) RenderMarkdown() ([]byte, error) {
 }
 
 // ContentHash returns a deterministic hex-encoded SHA-256 digest of the canonicalized
-// Frontmatter and normalized Markdown Body for immutable playbook versioning.
+// Meta and normalized Markdown Body for immutable playbook versioning.
 func (p *Playbook) ContentHash() (string, error) {
-	if err := p.ValidateSyntax(); err != nil {
+	if err := p.Validate(); err != nil {
 		return "", err
 	}
 	canonical := struct {
-		Frontmatter Frontmatter `json:"frontmatter"`
-		Body        string      `json:"body"`
+		Meta Meta   `json:"meta"`
+		Body string `json:"body"`
 	}{
-		Frontmatter: p.Frontmatter,
-		Body:        strings.TrimSpace(strings.ReplaceAll(p.Body, "\r\n", "\n")),
+		Meta: p.Meta,
+		Body: strings.TrimSpace(strings.ReplaceAll(p.Body, "\r\n", "\n")),
 	}
 	raw, err := json.Marshal(canonical)
 	if err != nil {
@@ -101,60 +109,31 @@ func (p *Playbook) ContentHash() (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
-// AllStateFields returns the merged map of Trigger.Inputs and State fields.
-func (p *Playbook) AllStateFields() StateSchema {
-	merged := make(StateSchema, len(p.Trigger.Inputs)+len(p.State))
-	for k, v := range p.Trigger.Inputs {
-		merged[k] = v
+// AllowsConnector reports whether the named connector is permitted for this playbook.
+// When AllowedConnectors is empty, any tenant-enabled connector is permitted.
+func (p *Playbook) AllowsConnector(name string) bool {
+	if len(p.AllowedConnectors) == 0 {
+		return true
 	}
-	for k, v := range p.State {
-		merged[k] = v
-	}
-	return merged
+	return slices.Contains(p.AllowedConnectors, name)
 }
 
-// AllowedOperations returns the set of whitelisted "<connector>.<operation>" identifiers
-// across both native Go operations and build-time compiled HTTP operations.
-func (p *Playbook) AllowedOperations() map[string]struct{} {
-	allowed := make(map[string]struct{})
-	for _, c := range p.Connectors {
-		for _, op := range c.Operations {
-			allowed[c.Name+"."+op] = struct{}{}
-		}
-		for op := range c.HTTPOperations {
-			allowed[c.Name+"."+op] = struct{}{}
-		}
-	}
-	return allowed
-}
-
-// CheckOutcomes evaluates the deterministic RequiredOutcomes completion gate before complete_run.
-// Returns a slice of human/agent-readable missing requirements (empty slice means ready to complete).
-func (p *Playbook) CheckOutcomes(populatedState map[string]bool, executedOps map[string]bool) []string {
-	if p.RequiredOutcomes == nil {
-		return nil
-	}
+// CheckCompletion verifies that every entry in RequiredTools was executed before complete_run.
+// Returns missing tool names (empty slice means ready to complete).
+func (p *Playbook) CheckCompletion(executedTools map[string]bool) []string {
 	var missing []string
-	for _, key := range p.RequiredOutcomes.StateKeys {
-		if !populatedState[key] {
-			missing = append(missing, fmt.Sprintf("missing required state key %q", key))
-		}
-	}
-	for _, op := range p.RequiredOutcomes.Operations {
-		if !executedOps[op] {
-			missing = append(missing, fmt.Sprintf("required operation %q has not been executed", op))
+	for _, tool := range p.RequiredTools {
+		if !executedTools[tool] {
+			missing = append(missing, tool)
 		}
 	}
 	return missing
 }
 
-// ValidateSyntax checks structural and syntactic invariants of the Playbook frontmatter and body.
-func (p *Playbook) ValidateSyntax() error {
+// Validate checks playbook metadata, execution bounds, connector allowlist, and non-empty body.
+func (p *Playbook) Validate() error {
 	var errs []error
 
-	if p.SchemaVersion != SchemaVersionV1 {
-		errs = append(errs, fmt.Errorf("unsupported schema_version %q (expected %q)", p.SchemaVersion, SchemaVersionV1))
-	}
 	if !playbookIDRe.MatchString(p.PlaybookID) {
 		errs = append(errs, fmt.Errorf("invalid playbook_id %q (must match ^[a-z][a-z0-9-]*$)", p.PlaybookID))
 	}
@@ -164,137 +143,42 @@ func (p *Playbook) ValidateSyntax() error {
 	if strings.TrimSpace(p.Name) == "" {
 		errs = append(errs, errors.New("name is required"))
 	}
-	if err := p.Owner.Validate(); err != nil {
-		errs = append(errs, fmt.Errorf("owner: %w", err))
-	}
 
-	// Trigger & State fields.
-	if p.Trigger.Archetype != ArchetypeRequestor {
-		errs = append(errs, fmt.Errorf("trigger.archetype must be %q, got %q", ArchetypeRequestor, p.Trigger.Archetype))
-	}
-	validateFieldMap := func(prefix string, fields StateSchema) {
-		for key, spec := range fields {
-			if !identRe.MatchString(key) {
-				errs = append(errs, fmt.Errorf("%s.%s: key must match ^[a-z][a-z0-9_]*$", prefix, key))
-			}
-			if !spec.Type.Valid() {
-				errs = append(errs, fmt.Errorf("%s.%s: unsupported field type %q", prefix, key, spec.Type))
-			}
-			if spec.Type == FieldTypeEnum && len(spec.Options) == 0 {
-				errs = append(errs, fmt.Errorf("%s.%s: enum field must define non-empty options", prefix, key))
-			}
-		}
-	}
-	validateFieldMap("trigger.inputs", p.Trigger.Inputs)
-	validateFieldMap("state", p.State)
-
-	for key := range p.State {
-		if _, dup := p.Trigger.Inputs[key]; dup {
-			errs = append(errs, fmt.Errorf("state.%s duplicates trigger.inputs.%s", key, key))
-		}
-	}
-	allFields := p.AllStateFields()
-
-	// Named role bindings.
-	for name, role := range p.Roles {
-		if !identRe.MatchString(name) {
-			errs = append(errs, fmt.Errorf("roles.%s: name must match ^[a-z][a-z0-9_]*$", name))
-		}
-		if !role.Archetype.Valid() {
-			errs = append(errs, fmt.Errorf("roles.%s: invalid archetype %q", name, role.Archetype))
-		}
-		if err := role.Binding.Validate(); err != nil {
-			errs = append(errs, fmt.Errorf("roles.%s.binding: %w", name, err))
-		}
-	}
-
-	// Connector whitelist & optional compiled HTTP operations.
-	seenConnectors := make(map[string]struct{}, len(p.Connectors))
-	for i, c := range p.Connectors {
-		if !identRe.MatchString(c.Name) {
-			errs = append(errs, fmt.Errorf("connectors[%d].name %q must match ^[a-z][a-z0-9_]*$", i, c.Name))
+	seenConns := make(map[string]struct{}, len(p.AllowedConnectors))
+	for _, c := range p.AllowedConnectors {
+		if !identRe.MatchString(c) {
+			errs = append(errs, fmt.Errorf("allowed_connectors entry %q must match ^[a-z][a-z0-9_]*$", c))
 			continue
 		}
-		if _, dup := seenConnectors[c.Name]; dup {
-			errs = append(errs, fmt.Errorf("duplicate connector %q in connectors whitelist", c.Name))
+		if _, dup := seenConns[c]; dup {
+			errs = append(errs, fmt.Errorf("duplicate connector %q in allowed_connectors", c))
 		}
-		seenConnectors[c.Name] = struct{}{}
+		seenConns[c] = struct{}{}
+	}
 
-		if len(c.Operations) == 0 && len(c.HTTPOperations) == 0 {
-			errs = append(errs, fmt.Errorf("connector %q must whitelist at least one operation or http_operation", c.Name))
+	for _, tool := range p.RequiredTools {
+		conn, op, ok := strings.Cut(tool, ".")
+		if !ok || !identRe.MatchString(conn) || !identRe.MatchString(op) {
+			errs = append(errs, fmt.Errorf("required_tools entry %q must have format <connector>.<operation>", tool))
+			continue
 		}
-		nativeOps := make(map[string]struct{}, len(c.Operations))
-		for _, op := range c.Operations {
-			if !identRe.MatchString(op) {
-				errs = append(errs, fmt.Errorf("connector %q operation %q must match ^[a-z][a-z0-9_]*$", c.Name, op))
-			}
-			nativeOps[op] = struct{}{}
-		}
-		for _, res := range c.Resources {
-			if !identRe.MatchString(res) {
-				errs = append(errs, fmt.Errorf("connector %q resource alias %q must match ^[a-z][a-z0-9_]*$", c.Name, res))
-			}
-		}
-		for opName, httpOp := range c.HTTPOperations {
-			if !identRe.MatchString(opName) {
-				errs = append(errs, fmt.Errorf("connector %q http_operation %q must match ^[a-z][a-z0-9_]*$", c.Name, opName))
-			}
-			if _, dup := nativeOps[opName]; dup {
-				errs = append(errs, fmt.Errorf("connector %q http_operation %q conflicts with native operation of the same name", c.Name, opName))
-			}
-			if err := validateHTTPOperation(c.Name, opName, httpOp, allFields); err != nil {
-				errs = append(errs, err)
+		if len(p.AllowedConnectors) > 0 {
+			if _, allowed := seenConns[conn]; !allowed {
+				errs = append(errs, fmt.Errorf("required_tools %q references connector %q not in allowed_connectors", tool, conn))
 			}
 		}
 	}
 
-	// Hard execution limits.
-	if p.Limits.MaxTurns < 1 {
-		errs = append(errs, fmt.Errorf("limits.max_turns must be >= 1, got %d", p.Limits.MaxTurns))
+	if p.MaxTurns < 1 {
+		errs = append(errs, fmt.Errorf("max_turns must be >= 1, got %d", p.MaxTurns))
 	}
-	if d, err := time.ParseDuration(p.Limits.MaxDuration); err != nil || d <= 0 {
-		errs = append(errs, fmt.Errorf("limits.max_duration %q must be a positive duration", p.Limits.MaxDuration))
-	}
-
-	// Deterministic required_outcomes gate.
-	if p.RequiredOutcomes != nil {
-		allowedOps := p.AllowedOperations()
-		for _, key := range p.RequiredOutcomes.StateKeys {
-			if _, ok := allFields[key]; !ok {
-				errs = append(errs, fmt.Errorf("required_outcomes.state_keys references undeclared field %q", key))
-			}
-		}
-		for _, op := range p.RequiredOutcomes.Operations {
-			if _, ok := allowedOps[op]; !ok {
-				errs = append(errs, fmt.Errorf("required_outcomes.operations references non-whitelisted operation %q", op))
-			}
-		}
+	if d, err := time.ParseDuration(p.MaxDuration); err != nil || d <= 0 {
+		errs = append(errs, fmt.Errorf("max_duration %q must be a positive duration", p.MaxDuration))
 	}
 
 	if strings.TrimSpace(p.Body) == "" {
 		errs = append(errs, errors.New("markdown playbook body must not be empty"))
 	}
 
-	return errors.Join(errs...)
-}
-
-func validateHTTPOperation(connector, opName string, h HTTPOperationSpec, allFields StateSchema) error {
-	var errs []error
-	switch h.Method {
-	case "GET", "POST", "PUT", "PATCH", "DELETE":
-	default:
-		errs = append(errs, fmt.Errorf("connector %q http_operation %q: method %q must be GET, POST, PUT, PATCH, or DELETE", connector, opName, h.Method))
-	}
-	if !strings.HasPrefix(h.Path, "/") || strings.Contains(h.Path, "://") {
-		errs = append(errs, fmt.Errorf("connector %q http_operation %q: path %q must be a relative path starting with '/' (no scheme/host allowed)", connector, opName, h.Path))
-	}
-	for stateKey, path := range h.Extract {
-		if _, ok := allFields[stateKey]; !ok {
-			errs = append(errs, fmt.Errorf("connector %q http_operation %q: extract references undeclared state key %q", connector, opName, stateKey))
-		}
-		if strings.TrimSpace(path) == "" {
-			errs = append(errs, fmt.Errorf("connector %q http_operation %q: extract.%s path must not be empty", connector, opName, stateKey))
-		}
-	}
 	return errors.Join(errs...)
 }
