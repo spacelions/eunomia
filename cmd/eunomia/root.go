@@ -16,6 +16,7 @@ import (
 	"github.com/spf13/viper"
 
 	"github.com/spacelions/eunomia/internal/config"
+	"github.com/spacelions/eunomia/internal/connector"
 	"github.com/spacelions/eunomia/internal/connectorstore"
 	"github.com/spacelions/eunomia/internal/db"
 	"github.com/spacelions/eunomia/internal/secrets"
@@ -101,21 +102,30 @@ func runServe(parentCtx context.Context, v *viper.Viper) error {
 		}
 	}()
 
-	// Verify DB-backed secret provider & connector store are ready for the default tenant.
-	_ = secrets.NewDBSecretProvider(database, wrapper)
+	// Verify DB-backed secret provider, connector store, and connector registry health.
+	secretProvider := secrets.NewDBSecretProvider(database, wrapper)
 	connStore := connectorstore.New(database)
-	enabledConns, err := connStore.ListEnabled(ctx, cfg.DefaultTenant)
+	registry := connector.NewRegistry(connStore, secretProvider, connector.NewLedger(database))
+
+	healthReport, err := registry.CheckTenantHealth(ctx, cfg.DefaultTenant)
 	if err != nil {
 		return fmt.Errorf("loading tenant connectors (did you run `eunomia migrate`?): %w", err)
 	}
-	connNames := make([]string, 0, len(enabledConns))
-	for _, c := range enabledConns {
-		connNames = append(connNames, c.ConnectorType)
+	connNames := make([]string, 0, len(healthReport.Connectors))
+	for _, c := range healthReport.Connectors {
+		connNames = append(connNames, c.Type)
+		if !c.Healthy {
+			logger.Warn("enabled connector failed health check", "tenant", cfg.DefaultTenant, "connector", c.Type, "err", c.Error)
+		}
+	}
+	if cfg.StrictConnectorBoot && !healthReport.Healthy() {
+		return fmt.Errorf("strict connector boot check failed for tenant %q: %w", cfg.DefaultTenant, healthReport.Err())
 	}
 	logger.Info("boot checks passed",
 		"active_master_key_id", wrapper.ActiveKeyID(),
 		"default_tenant", cfg.DefaultTenant,
 		"enabled_connectors", connNames,
+		"connectors_healthy", healthReport.Healthy(),
 	)
 
 	handler := server.NewHandler(func(checkCtx context.Context) error {

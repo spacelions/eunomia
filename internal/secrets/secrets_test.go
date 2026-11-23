@@ -233,4 +233,12 @@ func TestEnvelope_WrapperErrors(t *testing.T) {
 	fw := failingWrapper{wrapErr: errors.New("kms down"), unwrapErr: errors.New("kms down")}
 	_, err := secrets.EncryptEnvelope(ctx, fw, "t", "c", "k", []byte("val"))
 	require.Error(t, err)
+
+	// Coordinates containing null bytes must be rejected to prevent AAD boundary ambiguity.
+	_, err = secrets.EncryptEnvelope(ctx, fw, "t\x00x", "c", "k", []byte("val"))
+	require.Error(t, err)
+	_, err = secrets.EncryptEnvelope(ctx, fw, "t", "c\x00x", "k", []byte("val"))
+	require.Error(t, err)
+	_, err = secrets.EncryptEnvelope(ctx, fw, "t", "c", "k\x00x", []byte("val"))
+	require.Error(t, err)
 }

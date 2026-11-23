@@ -199,6 +199,10 @@ func TestCLI_Migrate_Connector_Secret_AndServeLifecycle(t *testing.T) {
 	cancelServe()
 	require.NoError(t, <-serveErrCh)
 
+	// Strict connector boot fails fast when an enabled connector is unhealthy/unregistered.
+	_, err = execCLI(ctx, "", "serve", "--strict-connector-boot")
+	require.Error(t, err)
+
 	// Serve fails cleanly when grpc-addr is already bound.
 	busyLn, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)

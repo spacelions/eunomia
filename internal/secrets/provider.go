@@ -53,6 +53,9 @@ func validateCoordinates(tenantID, connector, key string) error {
 	if strings.TrimSpace(key) == "" {
 		return errors.New("secret key is required")
 	}
+	if strings.ContainsRune(tenantID, '\x00') || strings.ContainsRune(connector, '\x00') || strings.ContainsRune(key, '\x00') {
+		return errors.New("secret coordinates must not contain null bytes")
+	}
 	return nil
 }
 
