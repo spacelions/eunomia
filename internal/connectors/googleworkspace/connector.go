@@ -35,7 +35,11 @@ const (
 	scopeGmailReadonly = "https://www.googleapis.com/auth/gmail.readonly"
 
 	idempotencyExternalIDType = "eunomia_idempotency_key"
-	passwordAlphabet          = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*-_"
+	passwordUpper             = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+	passwordLower             = "abcdefghijklmnopqrstuvwxyz"
+	passwordDigits            = "0123456789"
+	passwordSymbols           = "!@#$%^&*-_"
+	passwordAlphabet          = passwordUpper + passwordLower + passwordDigits + passwordSymbols
 )
 
 // Connector implements Google Workspace Directory & Gmail operations plus Channel delivery.
@@ -50,54 +54,64 @@ type Connector struct {
 // Factory constructs a tenant-configured Google Workspace connector authenticated via
 // GCP Service Account JSON and Domain-Wide Delegation (impersonate_email).
 func Factory(ctx context.Context, cfg connector.TenantConfig, secretReader connector.SecretReader) (connector.Connector, error) {
-	domain := strings.ToLower(strings.TrimSpace(cfg.Settings["domain"]))
-	if domain == "" {
-		return nil, errors.New("google_workspace requires settings.domain")
-	}
+	return NewFactoryWithEndpoints(defaultAdminBaseURL, defaultGmailBaseURL, "")(ctx, cfg, secretReader)
+}
 
-	impersonateEmail, err := actors.NormalizeEmail(cfg.Settings["impersonate_email"])
-	if err != nil {
-		return nil, fmt.Errorf("google_workspace invalid settings.impersonate_email: %w", err)
-	}
-
-	saJSON, err := secretReader.Get(ctx, "service_account_json")
-	if err != nil {
-		return nil, fmt.Errorf("google_workspace missing service_account_json secret: %w", err)
-	}
-
-	jwtCfg, err := google.JWTConfigFromJSON(saJSON, scopeAdminUsers, scopeGmailSend, scopeGmailReadonly)
-	if err != nil {
-		return nil, fmt.Errorf("google_workspace invalid service_account_json: %w", err)
-	}
-	jwtCfg.Subject = impersonateEmail
-	if tokenURL := strings.TrimSpace(cfg.Settings["token_url"]); tokenURL != "" {
-		jwtCfg.TokenURL = tokenURL
-	}
-
+// NewFactoryWithEndpoints constructs a Google Workspace Factory targeting explicit API
+// endpoints (primarily for hermetic httptest verification without exposing URLs in tenant settings).
+func NewFactoryWithEndpoints(adminBaseURL, gmailBaseURL, tokenURL string) connector.Factory {
 	adminBase := defaultAdminBaseURL
-	if raw := strings.TrimRight(strings.TrimSpace(cfg.Settings["admin_base_url"]), "/"); raw != "" {
+	if raw := strings.TrimRight(strings.TrimSpace(adminBaseURL), "/"); raw != "" {
 		adminBase = raw
 	}
 	gmailBase := defaultGmailBaseURL
-	if raw := strings.TrimRight(strings.TrimSpace(cfg.Settings["gmail_base_url"]), "/"); raw != "" {
+	if raw := strings.TrimRight(strings.TrimSpace(gmailBaseURL), "/"); raw != "" {
 		gmailBase = raw
 	}
+	tokURL := strings.TrimSpace(tokenURL)
 
-	httpClient := &http.Client{
-		Timeout: 30 * time.Second,
-		Transport: &oauth2.Transport{
-			Source: jwtCfg.TokenSource(context.Background()),
-			Base:   http.DefaultTransport,
-		},
+	return func(ctx context.Context, cfg connector.TenantConfig, secretReader connector.SecretReader) (connector.Connector, error) {
+		domain := strings.ToLower(strings.TrimSpace(cfg.Settings["domain"]))
+		if domain == "" {
+			return nil, errors.New("google_workspace requires settings.domain")
+		}
+
+		impersonateEmail, err := actors.NormalizeEmail(cfg.Settings["impersonate_email"])
+		if err != nil {
+			return nil, fmt.Errorf("google_workspace invalid settings.impersonate_email: %w", err)
+		}
+
+		saJSON, err := secretReader.Get(ctx, "service_account_json")
+		if err != nil {
+			return nil, fmt.Errorf("google_workspace missing service_account_json secret: %w", err)
+		}
+
+		jwtCfg, err := google.JWTConfigFromJSON(saJSON, scopeAdminUsers, scopeGmailSend, scopeGmailReadonly)
+		if err != nil {
+			return nil, fmt.Errorf("google_workspace invalid service_account_json: %w", err)
+		}
+		jwtCfg.Subject = impersonateEmail
+		if tokURL != "" {
+			jwtCfg.TokenURL = tokURL
+		}
+
+		tokenCtx := context.WithValue(context.Background(), oauth2.HTTPClient, &http.Client{Timeout: 15 * time.Second})
+		httpClient := &http.Client{
+			Timeout: 30 * time.Second,
+			Transport: &oauth2.Transport{
+				Source: jwtCfg.TokenSource(tokenCtx),
+				Base:   http.DefaultTransport,
+			},
+		}
+
+		return &Connector{
+			domain:           domain,
+			impersonateEmail: impersonateEmail,
+			adminBaseURL:     adminBase,
+			gmailBaseURL:     gmailBase,
+			httpClient:       httpClient,
+		}, nil
 	}
-
-	return &Connector{
-		domain:           domain,
-		impersonateEmail: impersonateEmail,
-		adminBaseURL:     adminBase,
-		gmailBaseURL:     gmailBase,
-		httpClient:       httpClient,
-	}, nil
 }
 
 func (c *Connector) Type() string { return Type }
@@ -321,10 +335,10 @@ func (c *Connector) createUser(ctx context.Context, idempotencyKey string, param
 		}
 		return &connector.CallResult{
 			Output: map[string]any{
-				"user_id":         created.ID,
-				"primary_email":   strings.ToLower(resolvedEmail),
-				"already_existed": false,
-				"temp_password":   password,
+				"user_id":                 created.ID,
+				"primary_email":           strings.ToLower(resolvedEmail),
+				"already_existed":         false,
+				"password_reset_required": changePassword,
 			},
 		}, nil
 	}
@@ -462,6 +476,9 @@ func (c *Connector) resolveEmail(params map[string]any) (string, error) {
 			if err != nil {
 				return "", err
 			}
+			if !strings.HasSuffix(norm, "@"+c.domain) {
+				return "", fmt.Errorf("email %q does not belong to configured workspace domain %q", norm, c.domain)
+			}
 			return norm, nil
 		}
 	}
@@ -514,14 +531,28 @@ func (c *Connector) doJSON(ctx context.Context, method, targetURL string, payloa
 }
 
 func generateTempPassword(length int) (string, error) {
+	if length < 4 {
+		length = 4
+	}
+	classes := []string{passwordUpper, passwordLower, passwordDigits, passwordSymbols}
 	buf := make([]byte, length)
-	max := big.NewInt(int64(len(passwordAlphabet)))
 	for i := range buf {
-		n, err := rand.Int(rand.Reader, max)
+		set := passwordAlphabet
+		if i < len(classes) {
+			set = classes[i]
+		}
+		idx, err := rand.Int(rand.Reader, big.NewInt(int64(len(set))))
 		if err != nil {
 			return "", err
 		}
-		buf[i] = passwordAlphabet[n.Int64()]
+		buf[i] = set[idx.Int64()]
+	}
+	for i := len(buf) - 1; i > 0; i-- {
+		j, err := rand.Int(rand.Reader, big.NewInt(int64(i+1)))
+		if err != nil {
+			return "", err
+		}
+		buf[i], buf[j.Int64()] = buf[j.Int64()], buf[i]
 	}
 	return string(buf), nil
 }

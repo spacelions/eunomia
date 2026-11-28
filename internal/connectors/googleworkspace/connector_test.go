@@ -177,10 +177,18 @@ func TestGoogleWorkspaceConnector_FullLifecycle(t *testing.T) {
 	connStore := connectorstore.New(database)
 	ledger := connector.NewLedger(database)
 	reg := connector.NewRegistry(connStore, secretProvider, ledger)
-	require.NoError(t, reg.Register(googleworkspace.Type, googleworkspace.Factory))
-
 	api := newFakeGoogleAPI(t)
 	saJSON := makeTestServiceAccountJSON(t, api.server.URL+"/oauth/token")
+
+	// Production Factory rejects invalid config cleanly and builds with default endpoints when valid.
+	_, prodErr := googleworkspace.Factory(ctx, connector.TenantConfig{Settings: map[string]string{}}, nil)
+	require.Error(t, prodErr)
+
+	require.NoError(t, reg.Register(googleworkspace.Type, googleworkspace.NewFactoryWithEndpoints(
+		api.server.URL,
+		api.server.URL,
+		api.server.URL+"/oauth/token",
+	)))
 
 	// 1. Factory config & secret validation errors.
 	require.NoError(t, connStore.Upsert(ctx, connectorstore.Record{
@@ -212,9 +220,6 @@ func TestGoogleWorkspaceConnector_FullLifecycle(t *testing.T) {
 		Settings: map[string]string{
 			"domain":            "spacelions.com",
 			"impersonate_email": "ops@spacelions.com",
-			"admin_base_url":    api.server.URL,
-			"gmail_base_url":    api.server.URL,
-			"token_url":         api.server.URL + "/oauth/token",
 		},
 	}))
 	_, _, err = reg.Resolve(ctx, "spacelions", googleworkspace.Type)
@@ -282,6 +287,13 @@ func TestGoogleWorkspaceConnector_FullLifecycle(t *testing.T) {
 	_, err = reg.Execute(ctx, googleworkspace.Type, connector.CallRequest{
 		TenantID:  "spacelions",
 		Operation: "username_available",
+		Params:    map[string]any{"email": "alice@otherdomain.com"},
+	})
+	require.Error(t, err)
+
+	_, err = reg.Execute(ctx, googleworkspace.Type, connector.CallRequest{
+		TenantID:  "spacelions",
+		Operation: "username_available",
 	})
 	require.Error(t, err)
 
@@ -330,8 +342,33 @@ func TestGoogleWorkspaceConnector_FullLifecycle(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "alice@spacelions.com", created.Output["primary_email"])
 	assert.Equal(t, false, created.Output["already_existed"])
-	assert.NotEmpty(t, created.Output["temp_password"])
+	assert.Equal(t, false, created.Output["password_reset_required"])
+	assert.Nil(t, created.Output["temp_password"])
 	callsAfterCreate := api.createCalls.Load()
+
+	// Generated password stored on Admin API request must never leak in Output, and satisfies complexity.
+	api.mu.Lock()
+	sentPass, _ := api.users["alice@spacelions.com"]["password"].(string)
+	api.mu.Unlock()
+	assert.Len(t, sentPass, 20)
+	assert.True(t, strings.ContainsAny(sentPass, "ABCDEFGHIJKLMNOPQRSTUVWXYZ"))
+	assert.True(t, strings.ContainsAny(sentPass, "abcdefghijklmnopqrstuvwxyz"))
+	assert.True(t, strings.ContainsAny(sentPass, "0123456789"))
+	assert.True(t, strings.ContainsAny(sentPass, "!@#$%^&*-_"))
+
+	// Cross-domain primary_email rejected on create_user as well.
+	_, err = reg.Execute(ctx, googleworkspace.Type, connector.CallRequest{
+		TenantID:  "spacelions",
+		RunID:     "run_01jcreate",
+		StepKey:   "cross_domain",
+		Operation: "create_user",
+		Params: map[string]any{
+			"primary_email": "alice@otherdomain.com",
+			"given_name":    "Alice",
+			"family_name":   "Wang",
+		},
+	})
+	require.Error(t, err)
 
 	// Replay same RunID:StepKey through Registry -> returns cached response without API call.
 	replayed, err := reg.Execute(ctx, googleworkspace.Type, createReq)
