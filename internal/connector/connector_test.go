@@ -325,6 +325,80 @@ func TestRegistry_SecretsIsolation_Catalog_Health_AndIdempotencyLedger(t *testin
 	assert.Equal(t, connector.ExecutionSucceeded, history[0].Status)
 	assert.Equal(t, connector.ExecutionSucceeded, history[1].Status)
 
+	// Reusing an existing idempotency key for a different connector/operation MUST fail with ErrIdempotencyKeyMismatch.
+	_, err = reg.Execute(ctx, "gmail", connector.CallRequest{
+		TenantID:       "spacelions",
+		IdempotencyKey: "run_01jtest:update_tracker",
+		RunID:          "run_01jtest",
+		Operation:      "send_email",
+	})
+	require.ErrorIs(t, err, connector.ErrIdempotencyKeyMismatch)
+
+	// Mid-call ctx cancellation MUST finalize the ledger cleanly instead of stranding `in_flight`.
+	var midCancelMu sync.Mutex
+	var midCancelFn context.CancelFunc
+	var failOnCancel atomic.Bool
+	failOnCancel.Store(true)
+
+	require.NoError(t, reg.Register("cancellable", func(context.Context, connector.TenantConfig, connector.SecretReader) (connector.Connector, error) {
+		return &stubConnector{
+			typ: "cancellable",
+			ops: []connector.OperationSpec{
+				{Name: "mutate", RiskTier: connector.RiskWrite},
+			},
+			callFn: func(callCtx context.Context, _ connector.CallRequest) (*connector.CallResult, error) {
+				midCancelMu.Lock()
+				fn := midCancelFn
+				midCancelMu.Unlock()
+				if fn != nil {
+					fn()
+				}
+				if failOnCancel.Load() {
+					return nil, callCtx.Err()
+				}
+				return &connector.CallResult{Output: map[string]any{"done": true}}, nil
+			},
+		}, nil
+	}))
+	require.NoError(t, connStore.Upsert(ctx, connectorstore.Record{
+		TenantID:      "spacelions",
+		ConnectorType: "cancellable",
+		Enabled:       true,
+	}))
+
+	// Case A: call cancels ctx and returns error -> ledger marks `failed`, allowing subsequent reclaim & retry.
+	callCtx1, cancel1 := context.WithCancel(ctx)
+	midCancelMu.Lock()
+	midCancelFn = cancel1
+	midCancelMu.Unlock()
+	_, err = reg.Execute(callCtx1, "cancellable", connector.CallRequest{
+		TenantID:  "spacelions",
+		RunID:     "run_01jcancel",
+		StepKey:   "step1",
+		Operation: "mutate",
+	})
+	require.ErrorIs(t, err, context.Canceled)
+
+	rows, err := ledger.ListByRun(ctx, "spacelions", "run_01jcancel")
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.Equal(t, connector.ExecutionFailed, rows[0].Status)
+
+	// Retry reclaims cleanly; even if ctx cancels just before return, MarkSucceeded still commits cleanly.
+	failOnCancel.Store(false)
+	callCtx2, cancel2 := context.WithCancel(ctx)
+	midCancelMu.Lock()
+	midCancelFn = cancel2
+	midCancelMu.Unlock()
+	res2, err := reg.Execute(callCtx2, "cancellable", connector.CallRequest{
+		TenantID:  "spacelions",
+		RunID:     "run_01jcancel",
+		StepKey:   "step1",
+		Operation: "mutate",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, true, res2.Output["done"])
+
 	// Canceled context propagates DB errors cleanly through Resolve, CheckTenantHealth, and Catalog.
 	canceledCtx, cancel := context.WithCancel(ctx)
 	cancel()

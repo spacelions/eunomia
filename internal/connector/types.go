@@ -42,6 +42,9 @@ var (
 
 	// ErrExecutionInFlight is returned when another worker is currently executing the same idempotency_key.
 	ErrExecutionInFlight = errors.New("connector execution already in flight")
+
+	// ErrIdempotencyKeyMismatch is returned when an existing idempotency_key is reused for a different connector or operation.
+	ErrIdempotencyKeyMismatch = errors.New("idempotency_key already bound to a different connector operation")
 )
 
 // IsValid reports whether r is a recognized RiskTier.

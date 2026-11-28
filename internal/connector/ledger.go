@@ -115,6 +115,11 @@ func (l *Ledger) Claim(ctx context.Context, p ClaimParams) (*Execution, bool, er
 			return fmt.Errorf("locking existing execution %s/%s: %w", p.TenantID, p.IdempotencyKey, err)
 		}
 
+		if existing.ConnectorType != p.ConnectorType || existing.Operation != p.Operation {
+			return fmt.Errorf("%w: %q belongs to %s.%s, not %s.%s",
+				ErrIdempotencyKeyMismatch, p.IdempotencyKey, existing.ConnectorType, existing.Operation, p.ConnectorType, p.Operation)
+		}
+
 		switch existing.Status {
 		case ExecutionSucceeded:
 			cached = existing
@@ -154,7 +159,7 @@ func (l *Ledger) MarkSucceeded(ctx context.Context, tenantID, idempotencyKey str
 		Set("response = ?", response).
 		Set("error_message = ?", "").
 		Set("updated_at = ?", time.Now().UTC()).
-		Where("tenant_id = ? AND idempotency_key = ?", tenantID, idempotencyKey).
+		Where("tenant_id = ? AND idempotency_key = ? AND status = ?", tenantID, idempotencyKey, ExecutionInFlight).
 		Exec(ctx)
 	if err != nil {
 		return fmt.Errorf("marking execution succeeded %s/%s: %w", tenantID, idempotencyKey, err)
@@ -176,7 +181,7 @@ func (l *Ledger) MarkFailed(ctx context.Context, tenantID, idempotencyKey, errMs
 		Set("status = ?", ExecutionFailed).
 		Set("error_message = ?", errMsg).
 		Set("updated_at = ?", time.Now().UTC()).
-		Where("tenant_id = ? AND idempotency_key = ?", tenantID, idempotencyKey).
+		Where("tenant_id = ? AND idempotency_key = ? AND status = ?", tenantID, idempotencyKey, ExecutionInFlight).
 		Exec(ctx)
 	if err != nil {
 		return fmt.Errorf("marking execution failed %s/%s: %w", tenantID, idempotencyKey, err)

@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/spacelions/eunomia/internal/connectorstore"
 	"github.com/spacelions/eunomia/internal/secrets"
@@ -260,7 +261,9 @@ func (r *Registry) Execute(ctx context.Context, connectorType string, req CallRe
 	res, callErr := conn.Call(ctx, req)
 	if callErr != nil {
 		if r.ledger != nil {
-			_ = r.ledger.MarkFailed(ctx, req.TenantID, idemKey, callErr.Error())
+			finalizeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			defer cancel()
+			_ = r.ledger.MarkFailed(finalizeCtx, req.TenantID, idemKey, callErr.Error())
 		}
 		return nil, callErr
 	}
@@ -272,7 +275,9 @@ func (r *Registry) Execute(ctx context.Context, connectorType string, req CallRe
 		res.Output = map[string]any{}
 	}
 	if r.ledger != nil {
-		if err := r.ledger.MarkSucceeded(ctx, req.TenantID, idemKey, res.Output); err != nil {
+		finalizeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		if err := r.ledger.MarkSucceeded(finalizeCtx, req.TenantID, idemKey, res.Output); err != nil {
 			return nil, err
 		}
 	}
