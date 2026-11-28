@@ -196,6 +196,12 @@ func extractRunID(prop any) string {
 	return content
 }
 
+type missingSecretReader struct{}
+
+func (missingSecretReader) Get(context.Context, string) ([]byte, error) {
+	return nil, secrets.ErrSecretNotFound
+}
+
 func TestNotionConnector_FullLifecycle(t *testing.T) {
 	_, database := testpg.NewMigrated(t)
 	ctx := context.Background()
@@ -209,9 +215,13 @@ func TestNotionConnector_FullLifecycle(t *testing.T) {
 	connStore := connectorstore.New(database)
 	ledger := connector.NewLedger(database)
 	reg := connector.NewRegistry(connStore, secretProvider, ledger)
-	require.NoError(t, reg.Register(notion.Type, notion.Factory))
-
 	api := newFakeNotionAPI(t, "ntn_live_token")
+
+	// Production Factory rejects missing secret cleanly.
+	_, prodErr := notion.Factory(ctx, connector.TenantConfig{}, missingSecretReader{})
+	require.Error(t, prodErr)
+
+	require.NoError(t, reg.Register(notion.Type, notion.NewFactoryWithBaseURL(api.server.URL)))
 
 	// 1. Missing/empty api_token secret fails Resolve.
 	require.NoError(t, connStore.Upsert(ctx, connectorstore.Record{
@@ -219,7 +229,6 @@ func TestNotionConnector_FullLifecycle(t *testing.T) {
 		ConnectorType: notion.Type,
 		Enabled:       true,
 		Settings: map[string]string{
-			"base_url":        api.server.URL,
 			"notion_version":  "2022-06-28",
 			"run_id_property": "Run ID",
 		},
@@ -252,7 +261,7 @@ func TestNotionConnector_FullLifecycle(t *testing.T) {
 		TenantID:      "spacelions",
 		ConnectorType: notion.Type,
 		Enabled:       true,
-		Settings:      map[string]string{"base_url": api.server.URL},
+		Settings:      map[string]string{},
 		Resources: map[string]string{
 			"onboarding_tracker": "db_tracker_123",
 			"broken_alias":       "db_missing_999",
@@ -267,7 +276,7 @@ func TestNotionConnector_FullLifecycle(t *testing.T) {
 		TenantID:      "spacelions",
 		ConnectorType: notion.Type,
 		Enabled:       true,
-		Settings:      map[string]string{"base_url": api.server.URL},
+		Settings:      map[string]string{},
 		Resources:     map[string]string{"onboarding_tracker": "db_tracker_123"},
 	}))
 
@@ -402,12 +411,37 @@ func TestNotionConnector_FullLifecycle(t *testing.T) {
 	require.Error(t, err)
 	api.patchStatus = http.StatusOK
 
+	// Custom title_property sets configured title column instead of hardcoded "Name".
+	require.NoError(t, connStore.Upsert(ctx, connectorstore.Record{
+		TenantID:      "spacelions",
+		ConnectorType: notion.Type,
+		Enabled:       true,
+		Settings:      map[string]string{"title_property": "Employee"},
+		Resources:     map[string]string{"onboarding_tracker": "db_tracker_123"},
+	}))
+	customRes, err := reg.Execute(ctx, notion.Type, connector.CallRequest{
+		TenantID:  "spacelions",
+		RunID:     "run_01jcustomtitle",
+		StepKey:   "create_custom_title",
+		Operation: "upsert_db_row",
+		Params: map[string]any{
+			"database": "onboarding_tracker",
+			"title":    "Bob Lee",
+		},
+	})
+	require.NoError(t, err)
+	customPageID := customRes.Output["page_id"].(string)
+	api.mu.Lock()
+	_, hasEmployeeProp := api.pages[customPageID].Properties["Employee"]
+	api.mu.Unlock()
+	assert.True(t, hasEmployeeProp)
+
 	// Empty resource DB ID fails HealthCheck.
 	require.NoError(t, connStore.Upsert(ctx, connectorstore.Record{
 		TenantID:      "spacelions",
 		ConnectorType: notion.Type,
 		Enabled:       true,
-		Settings:      map[string]string{"base_url": api.server.URL},
+		Settings:      map[string]string{},
 		Resources:     map[string]string{"empty_alias": "  "},
 	}))
 	badHealth, err = reg.CheckTenantHealth(ctx, "spacelions")

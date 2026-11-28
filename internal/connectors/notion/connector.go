@@ -24,6 +24,7 @@ const (
 	defaultBaseURL       = "https://api.notion.com"
 	defaultNotionVersion = "2022-06-28"
 	defaultRunIDProperty = "Run ID"
+	defaultTitleProperty = "Name"
 )
 
 // Connector implements Notion database query and idempotent tracker row upserts.
@@ -32,6 +33,7 @@ type Connector struct {
 	baseURL       string
 	notionVersion string
 	runIDProperty string
+	titleProperty string
 	resources     map[string]string
 	httpClient    *http.Client
 }
@@ -39,36 +41,50 @@ type Connector struct {
 // Factory constructs a tenant-configured Notion connector using the encrypted `api_token` secret
 // and tenant semantic resource aliases (e.g. onboarding_tracker -> database UUID).
 func Factory(ctx context.Context, cfg connector.TenantConfig, secretReader connector.SecretReader) (connector.Connector, error) {
-	tokenBytes, err := secretReader.Get(ctx, "api_token")
-	if err != nil {
-		return nil, fmt.Errorf("notion missing api_token secret: %w", err)
-	}
-	token := strings.TrimSpace(string(tokenBytes))
-	if token == "" {
-		return nil, errors.New("notion api_token must not be empty")
+	return NewFactoryWithBaseURL(defaultBaseURL)(ctx, cfg, secretReader)
+}
+
+// NewFactoryWithBaseURL constructs a Notion Factory targeting an explicit API base URL
+// (primarily for hermetic httptest verification without exposing URLs in tenant settings).
+func NewFactoryWithBaseURL(baseURL string) connector.Factory {
+	resolvedBase := defaultBaseURL
+	if raw := strings.TrimRight(strings.TrimSpace(baseURL), "/"); raw != "" {
+		resolvedBase = raw
 	}
 
-	baseURL := defaultBaseURL
-	if raw := strings.TrimRight(strings.TrimSpace(cfg.Settings["base_url"]), "/"); raw != "" {
-		baseURL = raw
-	}
-	notionVersion := defaultNotionVersion
-	if raw := strings.TrimSpace(cfg.Settings["notion_version"]); raw != "" {
-		notionVersion = raw
-	}
-	runIDProp := defaultRunIDProperty
-	if raw := strings.TrimSpace(cfg.Settings["run_id_property"]); raw != "" {
-		runIDProp = raw
-	}
+	return func(ctx context.Context, cfg connector.TenantConfig, secretReader connector.SecretReader) (connector.Connector, error) {
+		tokenBytes, err := secretReader.Get(ctx, "api_token")
+		if err != nil {
+			return nil, fmt.Errorf("notion missing api_token secret: %w", err)
+		}
+		token := strings.TrimSpace(string(tokenBytes))
+		if token == "" {
+			return nil, errors.New("notion api_token must not be empty")
+		}
 
-	return &Connector{
-		token:         token,
-		baseURL:       baseURL,
-		notionVersion: notionVersion,
-		runIDProperty: runIDProp,
-		resources:     maps.Clone(cfg.Resources),
-		httpClient:    &http.Client{Timeout: 30 * time.Second},
-	}, nil
+		notionVersion := defaultNotionVersion
+		if raw := strings.TrimSpace(cfg.Settings["notion_version"]); raw != "" {
+			notionVersion = raw
+		}
+		runIDProp := defaultRunIDProperty
+		if raw := strings.TrimSpace(cfg.Settings["run_id_property"]); raw != "" {
+			runIDProp = raw
+		}
+		titleProp := defaultTitleProperty
+		if raw := strings.TrimSpace(cfg.Settings["title_property"]); raw != "" {
+			titleProp = raw
+		}
+
+		return &Connector{
+			token:         token,
+			baseURL:       resolvedBase,
+			notionVersion: notionVersion,
+			runIDProperty: runIDProp,
+			titleProperty: titleProp,
+			resources:     maps.Clone(cfg.Resources),
+			httpClient:    &http.Client{Timeout: 30 * time.Second},
+		}, nil
+	}
 }
 
 func (c *Connector) Type() string { return Type }
@@ -332,8 +348,8 @@ func (c *Connector) buildProperties(params map[string]any, runID string) (map[st
 	}
 
 	if title := stringParam(params, "title"); title != "" {
-		if _, exists := props["Name"]; !exists {
-			props["Name"] = map[string]any{
+		if _, exists := props[c.titleProperty]; !exists {
+			props[c.titleProperty] = map[string]any{
 				"title": []map[string]any{
 					{"text": map[string]any{"content": title}},
 				},
