@@ -16,9 +16,11 @@ require (
 	github.com/uptrace/bun/driver/pgdriver v1.3.0
 	go.yaml.in/yaml/v3 v3.0.4
 	golang.org/x/net v0.63.0
+	golang.org/x/oauth2 v0.38.0
 )
 
 require (
+	cloud.google.com/go/compute/metadata v0.3.0 // indirect
 	connectrpc.com/connect v1.21.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
