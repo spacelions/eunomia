@@ -36,41 +36,49 @@ type Connector struct {
 
 // Factory constructs a tenant-configured Slack connector from bot_token and (when Socket Mode is enabled) app_token.
 func Factory(ctx context.Context, cfg connector.TenantConfig, secretReader connector.SecretReader) (connector.Connector, error) {
-	botBytes, err := secretReader.Get(ctx, "bot_token")
-	if err != nil {
-		return nil, fmt.Errorf("slack missing bot_token secret: %w", err)
-	}
-	botToken := strings.TrimSpace(string(botBytes))
-	if botToken == "" {
-		return nil, errors.New("slack bot_token must not be empty")
+	return NewFactoryWithBaseURL(defaultBaseURL)(ctx, cfg, secretReader)
+}
+
+// NewFactoryWithBaseURL constructs a Slack Factory targeting an explicit API base URL
+// (primarily for hermetic httptest verification without exposing URLs in tenant settings).
+func NewFactoryWithBaseURL(baseURL string) connector.Factory {
+	resolvedBase := defaultBaseURL
+	if raw := strings.TrimRight(strings.TrimSpace(baseURL), "/"); raw != "" {
+		resolvedBase = raw
 	}
 
-	socketMode := !strings.EqualFold(strings.TrimSpace(cfg.Settings["socket_mode"]), "false")
-	var appToken string
-	if socketMode {
-		appBytes, err := secretReader.Get(ctx, "app_token")
+	return func(ctx context.Context, cfg connector.TenantConfig, secretReader connector.SecretReader) (connector.Connector, error) {
+		botBytes, err := secretReader.Get(ctx, "bot_token")
 		if err != nil {
-			return nil, fmt.Errorf("slack socket mode requires app_token secret: %w", err)
+			return nil, fmt.Errorf("slack missing bot_token secret: %w", err)
 		}
-		appToken = strings.TrimSpace(string(appBytes))
-		if appToken == "" {
-			return nil, errors.New("slack app_token must not be empty when socket_mode is enabled")
+		botToken := strings.TrimSpace(string(botBytes))
+		if !strings.HasPrefix(botToken, "xoxb-") || len(botToken) <= len("xoxb-") {
+			return nil, errors.New("slack bot_token must be a valid xoxb- token")
 		}
-	}
 
-	baseURL := defaultBaseURL
-	if raw := strings.TrimRight(strings.TrimSpace(cfg.Settings["base_url"]), "/"); raw != "" {
-		baseURL = raw
-	}
+		socketMode := !strings.EqualFold(strings.TrimSpace(cfg.Settings["socket_mode"]), "false")
+		var appToken string
+		if socketMode {
+			appBytes, err := secretReader.Get(ctx, "app_token")
+			if err != nil {
+				return nil, fmt.Errorf("slack socket mode requires app_token secret: %w", err)
+			}
+			appToken = strings.TrimSpace(string(appBytes))
+			if !strings.HasPrefix(appToken, "xapp-") || len(appToken) <= len("xapp-") {
+				return nil, errors.New("slack app_token must be a valid xapp- token when socket_mode is enabled")
+			}
+		}
 
-	return &Connector{
-		botToken:   botToken,
-		appToken:   appToken,
-		socketMode: socketMode,
-		baseURL:    baseURL,
-		resources:  maps.Clone(cfg.Resources),
-		httpClient: &http.Client{Timeout: 30 * time.Second},
-	}, nil
+		return &Connector{
+			botToken:   botToken,
+			appToken:   appToken,
+			socketMode: socketMode,
+			baseURL:    resolvedBase,
+			resources:  maps.Clone(cfg.Resources),
+			httpClient: &http.Client{Timeout: 30 * time.Second},
+		}, nil
+	}
 }
 
 func (c *Connector) Type() string { return Type }

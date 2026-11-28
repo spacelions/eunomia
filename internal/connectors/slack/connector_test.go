@@ -18,6 +18,12 @@ import (
 	"github.com/spacelions/eunomia/test/testpg"
 )
 
+type missingSecretReader struct{}
+
+func (missingSecretReader) Get(context.Context, string) ([]byte, error) {
+	return nil, secrets.ErrSecretNotFound
+}
+
 func TestSlackConnector_EnabledToggle_Health_AndScaffolds(t *testing.T) {
 	_, database := testpg.NewMigrated(t)
 	ctx := context.Background()
@@ -31,7 +37,10 @@ func TestSlackConnector_EnabledToggle_Health_AndScaffolds(t *testing.T) {
 	connStore := connectorstore.New(database)
 	ledger := connector.NewLedger(database)
 	reg := connector.NewRegistry(connStore, secretProvider, ledger)
-	require.NoError(t, reg.Register(slack.Type, slack.Factory))
+
+	// Production Factory rejects missing secret cleanly.
+	_, prodErr := slack.Factory(ctx, connector.TenantConfig{}, missingSecretReader{})
+	require.Error(t, prodErr)
 
 	var authMode atomic.Int32 // 0=ok, 1=slack error, 2=http 500, 3=bad json
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -56,13 +65,13 @@ func TestSlackConnector_EnabledToggle_Health_AndScaffolds(t *testing.T) {
 		}
 	}))
 	t.Cleanup(server.Close)
+	require.NoError(t, reg.Register(slack.Type, slack.NewFactoryWithBaseURL(server.URL)))
 
 	// 1. Disabled by default: excluded from Catalog & CheckTenantHealth, Resolve returns ErrConnectorDisabled.
 	require.NoError(t, connStore.Upsert(ctx, connectorstore.Record{
 		TenantID:      "spacelions",
 		ConnectorType: slack.Type,
 		Enabled:       false,
-		Settings:      map[string]string{"base_url": server.URL},
 		Resources:     map[string]string{"it_ops_channel": "C01234"},
 	}))
 
@@ -78,12 +87,12 @@ func TestSlackConnector_EnabledToggle_Health_AndScaffolds(t *testing.T) {
 	_, _, err = reg.Resolve(ctx, "spacelions", slack.Type)
 	require.ErrorIs(t, err, connector.ErrConnectorDisabled)
 
-	// 2. Enable without secrets -> Factory rejects missing bot_token / empty bot_token / missing app_token.
+	// 2. Enable without secrets -> Factory rejects missing/invalid bot_token and app_token formats.
 	require.NoError(t, connStore.SetEnabled(ctx, "spacelions", slack.Type, true))
 	_, _, err = reg.Resolve(ctx, "spacelions", slack.Type)
 	require.Error(t, err)
 
-	require.NoError(t, secretProvider.Set(ctx, "spacelions", slack.Type, "bot_token", []byte("   ")))
+	require.NoError(t, secretProvider.Set(ctx, "spacelions", slack.Type, "bot_token", []byte("not-a-bot-token")))
 	_, _, err = reg.Resolve(ctx, "spacelions", slack.Type)
 	require.Error(t, err)
 
@@ -91,7 +100,7 @@ func TestSlackConnector_EnabledToggle_Health_AndScaffolds(t *testing.T) {
 	_, _, err = reg.Resolve(ctx, "spacelions", slack.Type)
 	require.Error(t, err, "socket_mode defaults to true so missing app_token must fail")
 
-	require.NoError(t, secretProvider.Set(ctx, "spacelions", slack.Type, "app_token", []byte("   ")))
+	require.NoError(t, secretProvider.Set(ctx, "spacelions", slack.Type, "app_token", []byte("not-an-app-token")))
 	_, _, err = reg.Resolve(ctx, "spacelions", slack.Type)
 	require.Error(t, err)
 
@@ -100,7 +109,7 @@ func TestSlackConnector_EnabledToggle_Health_AndScaffolds(t *testing.T) {
 		TenantID:      "spacelions",
 		ConnectorType: slack.Type,
 		Enabled:       true,
-		Settings:      map[string]string{"base_url": server.URL, "socket_mode": "false"},
+		Settings:      map[string]string{"socket_mode": "false"},
 		Resources:     map[string]string{"it_ops_channel": "C01234"},
 	}))
 	noSocketConn, _, err := reg.Resolve(ctx, "spacelions", slack.Type)
@@ -113,7 +122,6 @@ func TestSlackConnector_EnabledToggle_Health_AndScaffolds(t *testing.T) {
 		TenantID:      "spacelions",
 		ConnectorType: slack.Type,
 		Enabled:       true,
-		Settings:      map[string]string{"base_url": server.URL},
 		Resources:     map[string]string{"it_ops_channel": "C01234"},
 	}))
 	conn, _, err := reg.Resolve(ctx, "spacelions", slack.Type)
