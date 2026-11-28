@@ -17,14 +17,15 @@ import (
 // Config holds runtime engine boot configuration loaded via Viper (flags + env vars).
 // Connector settings and credentials live in PostgreSQL (tenant_connectors / tenant_secrets).
 type Config struct {
-	GRPCAddr          string
-	DatabaseURL       string
-	TemporalAddr      string
-	TemporalNamespace string
-	TemporalTaskQueue string
-	DefaultTenant     string
-	MasterKeys        string
-	DeepSeekAPIKey    string
+	GRPCAddr            string
+	DatabaseURL         string
+	TemporalAddr        string
+	TemporalNamespace   string
+	TemporalTaskQueue   string
+	DefaultTenant       string
+	MasterKeys          string
+	DeepSeekAPIKey      string
+	StrictConnectorBoot bool
 }
 
 // NewViper creates an isolated Viper instance configured for Eunomia's env vars and defaults.
@@ -39,6 +40,7 @@ func NewViper() *viper.Viper {
 	v.SetDefault("temporal-namespace", "default")
 	v.SetDefault("temporal-task-queue", "eunomia")
 	v.SetDefault("default-tenant", "spacelions")
+	v.SetDefault("strict-connector-boot", false)
 
 	_ = v.BindEnv("grpc-addr", "EUNOMIA_GRPC_ADDR")
 	_ = v.BindEnv("database-url", "EUNOMIA_DATABASE_URL")
@@ -48,6 +50,7 @@ func NewViper() *viper.Viper {
 	_ = v.BindEnv("default-tenant", "EUNOMIA_DEFAULT_TENANT")
 	_ = v.BindEnv("master-keys", "EUNOMIA_MASTER_KEYS")
 	_ = v.BindEnv("deepseek-api-key", "DEEPSEEK_API_KEY")
+	_ = v.BindEnv("strict-connector-boot", "EUNOMIA_STRICT_CONNECTOR_BOOT")
 
 	return v
 }
@@ -60,6 +63,7 @@ func RegisterFlags(fs *pflag.FlagSet, v *viper.Viper) {
 	fs.String("temporal-namespace", "default", "Temporal namespace (env: EUNOMIA_TEMPORAL_NAMESPACE)")
 	fs.String("temporal-task-queue", "eunomia", "Temporal task queue (env: EUNOMIA_TEMPORAL_TASK_QUEUE)")
 	fs.String("default-tenant", "spacelions", "Default tenant ID (env: EUNOMIA_DEFAULT_TENANT)")
+	fs.Bool("strict-connector-boot", false, "Abort startup if any enabled default-tenant connector fails HealthCheck (env: EUNOMIA_STRICT_CONNECTOR_BOOT)")
 
 	for _, name := range []string{
 		"grpc-addr",
@@ -68,6 +72,7 @@ func RegisterFlags(fs *pflag.FlagSet, v *viper.Viper) {
 		"temporal-namespace",
 		"temporal-task-queue",
 		"default-tenant",
+		"strict-connector-boot",
 	} {
 		_ = v.BindPFlag(name, fs.Lookup(name))
 	}
@@ -109,14 +114,15 @@ func LoadForSecretsFromViper(v *viper.Viper) (*Config, error) {
 
 func readFromViper(v *viper.Viper) *Config {
 	return &Config{
-		GRPCAddr:          strings.TrimSpace(v.GetString("grpc-addr")),
-		DatabaseURL:       strings.TrimSpace(v.GetString("database-url")),
-		TemporalAddr:      strings.TrimSpace(v.GetString("temporal-addr")),
-		TemporalNamespace: strings.TrimSpace(v.GetString("temporal-namespace")),
-		TemporalTaskQueue: strings.TrimSpace(v.GetString("temporal-task-queue")),
-		DefaultTenant:     strings.TrimSpace(v.GetString("default-tenant")),
-		MasterKeys:        strings.TrimSpace(v.GetString("master-keys")),
-		DeepSeekAPIKey:    strings.TrimSpace(v.GetString("deepseek-api-key")),
+		GRPCAddr:            strings.TrimSpace(v.GetString("grpc-addr")),
+		DatabaseURL:         strings.TrimSpace(v.GetString("database-url")),
+		TemporalAddr:        strings.TrimSpace(v.GetString("temporal-addr")),
+		TemporalNamespace:   strings.TrimSpace(v.GetString("temporal-namespace")),
+		TemporalTaskQueue:   strings.TrimSpace(v.GetString("temporal-task-queue")),
+		DefaultTenant:       strings.TrimSpace(v.GetString("default-tenant")),
+		MasterKeys:          strings.TrimSpace(v.GetString("master-keys")),
+		DeepSeekAPIKey:      strings.TrimSpace(v.GetString("deepseek-api-key")),
+		StrictConnectorBoot: v.GetBool("strict-connector-boot"),
 	}
 }
 
@@ -175,6 +181,7 @@ func (c Config) LogValue() slog.Value {
 		slog.String("temporal_namespace", c.TemporalNamespace),
 		slog.String("temporal_task_queue", c.TemporalTaskQueue),
 		slog.String("default_tenant", c.DefaultTenant),
+		slog.Bool("strict_connector_boot", c.StrictConnectorBoot),
 		slog.Bool("master_keys_set", c.MasterKeys != ""),
 		slog.Bool("deepseek_api_key_set", c.DeepSeekAPIKey != ""),
 	)

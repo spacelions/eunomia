@@ -38,6 +38,7 @@ func TestMigrate_Idempotent(t *testing.T) {
 		"playbook_drafts",
 		"case_runs",
 		"interaction_tasks",
+		"connector_executions",
 	} {
 		var exists bool
 		err := database.QueryRowContext(ctx,
