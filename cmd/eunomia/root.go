@@ -17,6 +17,7 @@ import (
 
 	"github.com/spacelions/eunomia/internal/config"
 	"github.com/spacelions/eunomia/internal/connector"
+	"github.com/spacelions/eunomia/internal/connectors/googleworkspace"
 	"github.com/spacelions/eunomia/internal/connectorstore"
 	"github.com/spacelions/eunomia/internal/db"
 	"github.com/spacelions/eunomia/internal/secrets"
@@ -106,6 +107,7 @@ func runServe(parentCtx context.Context, v *viper.Viper) error {
 	secretProvider := secrets.NewDBSecretProvider(database, wrapper)
 	connStore := connectorstore.New(database)
 	registry := connector.NewRegistry(connStore, secretProvider, connector.NewLedger(database))
+	_ = registry.Register(googleworkspace.Type, googleworkspace.Factory)
 
 	healthReport, err := registry.CheckTenantHealth(ctx, cfg.DefaultTenant)
 	if err != nil {
